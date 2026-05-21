@@ -92,9 +92,15 @@ class TrainConfig:
     entropy_coef: float = 0.01                # Entropy bonus coefficient
     grad_clip: float = 0.5                    # Gradient clipping threshold
     ppo_epochs: int = 4                       # PPO update epochs per batch
+    vectorized_update: bool = True            # Batched mini-batch PPO update
+    update_batch_size: int = 128              # Mini-batch size for vectorized update
+    update_shuffle: bool = True               # Shuffle transitions during PPO update
     
     # Multi-trajectory collection
     n_trajectories: int = 8                   # Trajectories per update
+    rollout_num_workers: int = 0              # 0 = auto, min(n_trajectories, cpu_count)
+    rollout_device: str = 'cpu'               # Worker inference device
+    rollout_torch_threads: int = 1            # Torch threads per worker
 
     # Deterministic evaluation/checkpointing
     eval_interval: int = 10
@@ -108,6 +114,9 @@ class TrainConfig:
     visdom_env: str = 'usv_training'
     log_interval: int = 10
     save_interval: int = 50
+    save_training_csv: bool = True
+    training_log_dir: str = 'results/training_logs'
+    training_log_interval: int = 1
 
     def get(self, key: str, default=None):
         """Get attribute with default fallback."""

@@ -15,7 +15,6 @@ from typing import List, Tuple
 import numpy as np
 
 from config import get_config
-from main import train
 
 
 def _rank_abs(values: List[float]) -> List[float]:
@@ -67,6 +66,8 @@ def _parse_seeds(seed_text: str) -> List[int]:
 
 
 def run_public25(args) -> List[dict]:
+    from main import train
+
     manifest_path = os.path.join(args.data_dir, 'manifest.csv')
     os.makedirs(args.result_dir, exist_ok=True)
 
@@ -110,6 +111,15 @@ def run_public25(args) -> List[dict]:
                 eval_interval=10,
                 use_visdom=args.visdom,
                 visdom_env='usv_training',
+                save_training_csv=not args.no_training_csv,
+                training_log_dir=os.path.join(args.result_dir, 'training_logs'),
+                training_log_interval=args.training_log_interval,
+                rollout_num_workers=args.rollout_num_workers,
+                rollout_device=args.rollout_device,
+                rollout_torch_threads=args.rollout_torch_threads,
+                vectorized_update=not args.legacy_update,
+                update_batch_size=args.update_batch_size,
+                update_shuffle=not args.no_update_shuffle,
             )
 
             _, _, train_info = train(cfg)
@@ -177,6 +187,14 @@ def build_parser():
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--n-trajectories', type=int, default=8)
     parser.add_argument('--visdom', action='store_true')
+    parser.add_argument('--no-training-csv', action='store_true')
+    parser.add_argument('--training-log-interval', type=int, default=1)
+    parser.add_argument('--rollout-num-workers', type=int, default=0)
+    parser.add_argument('--rollout-device', default='cpu')
+    parser.add_argument('--rollout-torch-threads', type=int, default=1)
+    parser.add_argument('--legacy-update', action='store_true')
+    parser.add_argument('--update-batch-size', type=int, default=128)
+    parser.add_argument('--no-update-shuffle', action='store_true')
     return parser
 
 

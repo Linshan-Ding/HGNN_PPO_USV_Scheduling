@@ -333,14 +333,24 @@ class PairwiseActor(nn.Module):
         task_embed = encoded['task_embed']
         usv_embed = encoded['usv_embed']
         graph_embed = encoded['graph_embed']
-        n_tasks = task_embed.size(0)
-        n_usvs = usv_embed.size(0)
+        squeeze_batch = False
+        if task_embed.dim() == 2:
+            task_embed = task_embed.unsqueeze(0)
+            usv_embed = usv_embed.unsqueeze(0)
+            graph_embed = graph_embed.unsqueeze(0)
+            edge_features = edge_features.unsqueeze(0)
+            pair_mask = pair_mask.unsqueeze(0)
+            squeeze_batch = True
+
+        batch_size = task_embed.size(0)
+        n_tasks = task_embed.size(1)
+        n_usvs = usv_embed.size(1)
         device = task_embed.device
 
-        task_exp = task_embed.unsqueeze(1).expand(n_tasks, n_usvs, -1)
-        usv_exp = usv_embed.unsqueeze(0).expand(n_tasks, n_usvs, -1)
-        edge_tu = edge_features.permute(1, 0, 2)
-        graph_exp = graph_embed.view(1, 1, -1).expand(n_tasks, n_usvs, -1)
+        task_exp = task_embed.unsqueeze(2).expand(batch_size, n_tasks, n_usvs, -1)
+        usv_exp = usv_embed.unsqueeze(1).expand(batch_size, n_tasks, n_usvs, -1)
+        edge_tu = edge_features.permute(0, 2, 1, 3)
+        graph_exp = graph_embed.view(batch_size, 1, 1, -1).expand(batch_size, n_tasks, n_usvs, -1)
 
         pair_inputs = torch.cat([task_exp, usv_exp, edge_tu, graph_exp], dim=-1)
         logits = self.scorer(pair_inputs).squeeze(-1)
@@ -348,13 +358,17 @@ class PairwiseActor(nn.Module):
         masked_logits = logits.clone()
         masked_logits[~pair_mask] = float('-inf')
 
-        flat_mask = pair_mask.reshape(-1)
-        flat_probs = torch.zeros(n_tasks * n_usvs, device=device)
-        if flat_mask.sum() > 0:
-            flat_logits = masked_logits.reshape(-1)
-            flat_probs = F.softmax(flat_logits, dim=0)
+        flat_mask = pair_mask.reshape(batch_size, -1)
+        flat_logits = masked_logits.reshape(batch_size, -1)
+        flat_probs = torch.zeros(batch_size, n_tasks * n_usvs, device=device)
+        has_legal = flat_mask.sum(dim=1) > 0
+        if has_legal.any():
+            flat_probs[has_legal] = F.softmax(flat_logits[has_legal], dim=-1)
 
-        return masked_logits, flat_probs.view(n_tasks, n_usvs)
+        probs = flat_probs.view(batch_size, n_tasks, n_usvs)
+        if squeeze_batch:
+            return masked_logits.squeeze(0), probs.squeeze(0)
+        return masked_logits, probs
 
     def get_action_log_prob(self, encoded: dict, edge_features: torch.Tensor,
                             pair_mask: torch.Tensor, action: Tuple[int, int]
@@ -374,6 +388,19 @@ class PairwiseActor(nn.Module):
             entropy = torch.tensor(0.0, device=probs.device)
 
         return log_prob, entropy, probs
+
+    def get_batch_action_log_prob(self, encoded: dict, edge_features: torch.Tensor,
+                                  pair_mask: torch.Tensor,
+                                  actions_flat: torch.Tensor
+                                  ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return batched log probabilities, per-sample entropy, and probabilities."""
+        _, probs = self.forward(encoded, edge_features, pair_mask)
+        flat_probs = probs.reshape(probs.size(0), -1)
+        flat_mask = pair_mask.reshape(pair_mask.size(0), -1)
+        action_probs = flat_probs.gather(1, actions_flat.view(-1, 1)).squeeze(1)
+        log_probs = torch.log(action_probs + 1e-10)
+        entropy = -(flat_probs * flat_mask * torch.log(flat_probs + 1e-10)).sum(dim=1)
+        return log_probs, entropy, probs
 
     def select_action(self, encoded: dict, edge_features: torch.Tensor,
                       pair_mask: torch.Tensor, deterministic: bool = False

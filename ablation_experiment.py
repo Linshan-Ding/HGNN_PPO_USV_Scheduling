@@ -77,6 +77,15 @@ def run_ablation(args) -> List[dict]:
                 visdom_port=args.visdom_port,
                 visdom_env=visdom_env,
                 ablation_variant=variant,
+                save_training_csv=not args.no_training_csv,
+                training_log_dir=os.path.join(args.result_dir, 'training_logs'),
+                training_log_interval=args.training_log_interval,
+                rollout_num_workers=args.rollout_num_workers,
+                rollout_device=args.rollout_device,
+                rollout_torch_threads=args.rollout_torch_threads,
+                vectorized_update=not args.legacy_update,
+                update_batch_size=args.update_batch_size,
+                update_shuffle=not args.no_update_shuffle,
             )
 
             print("=" * 80)
@@ -166,6 +175,14 @@ def build_parser():
     parser.add_argument('--visdom', action='store_true')
     parser.add_argument('--visdom-server', default='http://localhost')
     parser.add_argument('--visdom-port', type=int, default=8097)
+    parser.add_argument('--no-training-csv', action='store_true')
+    parser.add_argument('--training-log-interval', type=int, default=1)
+    parser.add_argument('--rollout-num-workers', type=int, default=0)
+    parser.add_argument('--rollout-device', default='cpu')
+    parser.add_argument('--rollout-torch-threads', type=int, default=1)
+    parser.add_argument('--legacy-update', action='store_true')
+    parser.add_argument('--update-batch-size', type=int, default=128)
+    parser.add_argument('--no-update-shuffle', action='store_true')
     return parser
 
 

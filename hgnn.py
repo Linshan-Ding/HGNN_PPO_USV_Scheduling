@@ -120,25 +120,36 @@ class BipartiteAttentionLayer(nn.Module):
         Returns:
             Updated target features [num_tgt, out_dim]
         """
-        num_src = src_feats.size(0)
-        num_tgt = tgt_feats.size(0)
+        squeeze_batch = False
+        if src_feats.dim() == 2:
+            src_feats = src_feats.unsqueeze(0)
+            tgt_feats = tgt_feats.unsqueeze(0)
+            if adj_mask.dim() == 2:
+                adj_mask = adj_mask.unsqueeze(0)
+            squeeze_batch = True
+
+        batch_size = src_feats.size(0)
+        num_src = src_feats.size(1)
+        num_tgt = tgt_feats.size(1)
         
         # Compute Q, K, V
-        Q = self.W_q(tgt_feats).view(num_tgt, self.num_heads, self.head_dim)
-        K = self.W_k(src_feats).view(num_src, self.num_heads, self.head_dim)
-        V = self.W_v(src_feats).view(num_src, self.num_heads, self.head_dim)
+        Q = self.W_q(tgt_feats).view(batch_size, num_tgt, self.num_heads, self.head_dim)
+        K = self.W_k(src_feats).view(batch_size, num_src, self.num_heads, self.head_dim)
+        V = self.W_v(src_feats).view(batch_size, num_src, self.num_heads, self.head_dim)
         
-        # Transpose to [heads, nodes, head_dim]
-        Q = Q.transpose(0, 1)
-        K = K.transpose(0, 1)
-        V = V.transpose(0, 1)
+        # Transpose to [batch, heads, nodes, head_dim]
+        Q = Q.transpose(1, 2)
+        K = K.transpose(1, 2)
+        V = V.transpose(1, 2)
         
-        # Compute attention scores [heads, num_tgt, num_src]
+        # Compute attention scores [batch, heads, num_tgt, num_src]
         scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)
         
         # Apply adjacency mask
-        adj_mask_t = adj_mask.t()  # [num_tgt, num_src]
-        mask_exp = adj_mask_t.unsqueeze(0).expand(self.num_heads, -1, -1)
+        if adj_mask.dim() == 2:
+            adj_mask = adj_mask.unsqueeze(0).expand(batch_size, -1, -1)
+        adj_mask_t = adj_mask.transpose(-2, -1)  # [batch, num_tgt, num_src]
+        mask_exp = adj_mask_t.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
         scores = scores.masked_fill(~mask_exp, float('-inf'))
         
         # Softmax and dropout
@@ -146,8 +157,12 @@ class BipartiteAttentionLayer(nn.Module):
         attn_weights = self.dropout(attn_weights)
         
         # Aggregate neighbor information
-        neighbor_info = torch.matmul(attn_weights, V)  # [heads, num_tgt, head_dim]
-        neighbor_info = neighbor_info.transpose(0, 1).contiguous().view(num_tgt, -1)
+        neighbor_info = torch.matmul(attn_weights, V)  # [batch, heads, num_tgt, head_dim]
+        neighbor_info = (
+            neighbor_info.transpose(1, 2)
+            .contiguous()
+            .view(batch_size, num_tgt, -1)
+        )
         
         # Combine with self information
         self_info = self.W_self(tgt_feats)
@@ -159,7 +174,7 @@ class BipartiteAttentionLayer(nn.Module):
         else:
             output = self.layer_norm(output)
         
-        return output
+        return output.squeeze(0) if squeeze_batch else output
 
 
 class HGNNEncoder(nn.Module):
@@ -245,43 +260,27 @@ class HGNNEncoder(nn.Module):
         Returns:
             Aggregated features for each target node
         """
-        num_tgt = tgt_feats.size(0)
-        device = src_feats.device
-        aggregated = []
-        
-        for tgt_idx in range(num_tgt):
-            if is_task_to_usv:
-                # USV aggregates from connected Tasks
-                connected = adj_mask[tgt_idx, :]
-                if connected.sum() > 0:
-                    src_edge_concat = torch.cat([
-                        src_feats[connected],
-                        edge_feats[tgt_idx, connected, :]
-                    ], dim=-1)
-                    agg_feat = src_edge_concat.mean(dim=0)
-                else:
-                    agg_feat = torch.zeros(
-                        src_feats.size(1) + edge_feats.size(2),
-                        device=device
-                    )
-            else:
-                # Task aggregates from connected USVs
-                connected = adj_mask[:, tgt_idx]
-                if connected.sum() > 0:
-                    src_edge_concat = torch.cat([
-                        src_feats[connected],
-                        edge_feats[connected, tgt_idx, :]
-                    ], dim=-1)
-                    agg_feat = src_edge_concat.mean(dim=0)
-                else:
-                    agg_feat = torch.zeros(
-                        src_feats.size(1) + edge_feats.size(2),
-                        device=device
-                    )
-            
-            aggregated.append(agg_feat)
-        
-        return torch.stack(aggregated, dim=0)
+        squeeze_batch = False
+        if src_feats.dim() == 2:
+            src_feats = src_feats.unsqueeze(0)
+            tgt_feats = tgt_feats.unsqueeze(0)
+            edge_feats = edge_feats.unsqueeze(0)
+            squeeze_batch = True
+
+        batch_size = src_feats.size(0)
+        num_tgt = tgt_feats.size(1)
+
+        if is_task_to_usv:
+            # USV aggregates the mean task feature plus mean edge feature per USV.
+            src_mean = src_feats.mean(dim=1, keepdim=True).expand(batch_size, num_tgt, -1)
+            edge_mean = edge_feats.mean(dim=2)
+        else:
+            # Task aggregates the mean USV feature plus mean edge feature per task.
+            src_mean = src_feats.mean(dim=1, keepdim=True).expand(batch_size, num_tgt, -1)
+            edge_mean = edge_feats.mean(dim=1)
+
+        aggregated = torch.cat([src_mean, edge_mean], dim=-1)
+        return aggregated.squeeze(0) if squeeze_batch else aggregated
     
     def forward(self, state_dict: dict) -> dict:
         """
@@ -305,8 +304,9 @@ class HGNNEncoder(nn.Module):
         task_feats = state_dict['task_features']
         edge_feats = state_dict['edge_features']
         
-        num_usvs = usv_feats.size(0)
-        num_tasks = task_feats.size(0)
+        batched = usv_feats.dim() == 3
+        num_usvs = usv_feats.size(-2)
+        num_tasks = task_feats.size(-2)
         device = usv_feats.device
         
         # Step 1: Normalize features
@@ -315,7 +315,14 @@ class HGNNEncoder(nn.Module):
         edge_feats = self.edge_normalizer(edge_feats)
         
         # Fully connected adjacency
-        adj_matrix = torch.ones(num_usvs, num_tasks, dtype=torch.bool, device=device)
+        if batched:
+            adj_matrix = torch.ones(
+                usv_feats.size(0), num_usvs, num_tasks,
+                dtype=torch.bool,
+                device=device
+            )
+        else:
+            adj_matrix = torch.ones(num_usvs, num_tasks, dtype=torch.bool, device=device)
         
         # Step 2: Initial embedding with edge aggregation
         usv_agg = self._aggregate_with_edges(
@@ -334,7 +341,7 @@ class HGNNEncoder(nn.Module):
             usv_embeds_new = self.task_to_usv_layers[layer_idx](
                 src_feats=task_embeds,
                 tgt_feats=usv_embeds,
-                adj_mask=adj_matrix.t()
+                adj_mask=adj_matrix.transpose(-2, -1)
             )
             
             # USV -> Task message passing
@@ -348,8 +355,9 @@ class HGNNEncoder(nn.Module):
             task_embeds = task_embeds_new
         
         # Step 4: Graph-level pooling
-        usv_pool = self.usv_pooling(usv_embeds.mean(dim=0))
-        task_pool = self.task_pooling(task_embeds.mean(dim=0))
+        pool_dim = 1 if batched else 0
+        usv_pool = self.usv_pooling(usv_embeds.mean(dim=pool_dim))
+        task_pool = self.task_pooling(task_embeds.mean(dim=pool_dim))
         graph_embed = torch.cat([usv_pool, task_pool], dim=-1)
         
         return {

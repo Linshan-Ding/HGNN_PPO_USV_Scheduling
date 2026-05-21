@@ -15,6 +15,8 @@ Benefits of dual encoders:
 """
 
 import copy
+import os
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -62,8 +64,9 @@ class SimpleGraphEncoder(nn.Module):
     def forward(self, state_dict: dict) -> dict:
         usv_embed = self.usv_encoder(state_dict['usv_features'])
         task_embed = self.task_encoder(state_dict['task_features'])
+        pool_dim = 1 if usv_embed.dim() == 3 else 0
         graph_embed = torch.cat(
-            [usv_embed.mean(dim=0), task_embed.mean(dim=0)],
+            [usv_embed.mean(dim=pool_dim), task_embed.mean(dim=pool_dim)],
             dim=-1,
         )
         return {
@@ -76,7 +79,8 @@ class SimpleGraphEncoder(nn.Module):
 class PPOAgent:
     """PPO agent with separate encoders for actor and critic."""
     
-    def __init__(self, config, n_usvs: int, n_tasks: int):
+    def __init__(self, config, n_usvs: int, n_tasks: int,
+                 device: str = None, verbose: bool = True):
         """
         Initialize PPO agent with dual HGNN encoders.
         
@@ -88,7 +92,10 @@ class PPOAgent:
         self.config = config
         self.n_usvs = n_usvs
         self.n_tasks = n_tasks
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
         self.variant = config.network.get('ablation_variant', 'full')
         if self.variant not in VALID_ABLATION_VARIANTS:
             raise ValueError(
@@ -180,15 +187,16 @@ class PPOAgent:
         self.reset_buffer()
         self.update_count = 0
         
-        print(f"[PPO] Variant: {self.variant}")
-        print(f"[PPO] Encoder Architecture: {self._encoder_name()}")
-        print(f"  - Actor Encoder: {sum(p.numel() for p in self.actor_encoder.parameters())} params")
-        if self.use_shared_encoder:
-            print(f"  - Critic Encoder: shared with Actor Encoder")
-        else:
-            print(f"  - Critic Encoder: {sum(p.numel() for p in self.critic_encoder.parameters())} params")
-        print(f"  - Actor: {sum(p.numel() for p in self.actor.parameters())} params")
-        print(f"  - Critic: {sum(p.numel() for p in self.critic.parameters())} params")
+        if verbose:
+            print(f"[PPO] Variant: {self.variant}")
+            print(f"[PPO] Encoder Architecture: {self._encoder_name()}")
+            print(f"  - Actor Encoder: {sum(p.numel() for p in self.actor_encoder.parameters())} params")
+            if self.use_shared_encoder:
+                print(f"  - Critic Encoder: shared with Actor Encoder")
+            else:
+                print(f"  - Critic Encoder: {sum(p.numel() for p in self.critic_encoder.parameters())} params")
+            print(f"  - Actor: {sum(p.numel() for p in self.actor.parameters())} params")
+            print(f"  - Critic: {sum(p.numel() for p in self.critic.parameters())} params")
 
     def _build_encoder(self, hidden_dim: int) -> nn.Module:
         """Build the encoder selected by the current ablation variant."""
@@ -327,8 +335,226 @@ class PPOAgent:
         return advantages, returns
     
     def update(self) -> Dict[str, float]:
+        """Run the configured PPO update implementation."""
+        if len(self.states) == 0:
+            return {'actor_loss': 0, 'critic_loss': 0, 'entropy': 0}
+        if not self.config.train.get('vectorized_update', True):
+            return self.legacy_update()
+        return self._update_vectorized()
+
+    def _build_update_batch(self) -> Dict[str, torch.Tensor]:
+        """Convert the rollout buffer into CPU batched tensors.
+
+        Keeping the full rollout batch on CPU avoids CUDA advanced-indexing
+        kernels during mini-batch slicing. Each mini-batch is moved to the
+        training device only after CPU slicing, which is more stable on Windows
+        display-GPU setups and keeps persistent GPU memory lower.
         """
-        Perform PPO update with dual encoders.
+        advantages, returns = self.compute_gae()
+        usv_features = np.stack([s['usv_features'] for s in self.states], axis=0)
+        task_features = np.stack([s['task_features'] for s in self.states], axis=0)
+        edge_features = np.stack([s['edge_features'] for s in self.states], axis=0)
+        actions_flat = np.array(
+            [task_id * self.n_usvs + usv_id for task_id, usv_id in self.actions],
+            dtype=np.int64
+        )
+
+        batch = {
+            'usv_features': torch.as_tensor(usv_features, dtype=torch.float32),
+            'task_features': torch.as_tensor(task_features, dtype=torch.float32),
+            'edge_features': torch.as_tensor(edge_features, dtype=torch.float32),
+            'pair_masks': torch.stack(self.usv_masks_list).detach().cpu(),
+            'actions_flat': torch.as_tensor(actions_flat, dtype=torch.long),
+            'old_log_probs': torch.as_tensor(self.log_probs, dtype=torch.float32),
+            'advantages': advantages.detach().cpu(),
+            'returns': returns.detach().cpu(),
+        }
+        self._validate_update_batch(batch)
+        return batch
+
+    def _validate_update_batch(self, batch: Dict[str, torch.Tensor]):
+        """Fail early on CPU before invalid data can trigger opaque CUDA errors."""
+        n_samples = batch['actions_flat'].numel()
+        max_action = self.n_tasks * self.n_usvs
+        if n_samples == 0:
+            raise ValueError("PPO update received an empty rollout batch.")
+
+        min_action = int(batch['actions_flat'].min().item())
+        max_seen_action = int(batch['actions_flat'].max().item())
+        if min_action < 0 or max_seen_action >= max_action:
+            raise ValueError(
+                "Invalid flattened action index in PPO buffer: "
+                f"min={min_action}, max={max_seen_action}, "
+                f"valid_range=[0,{max_action - 1}], "
+                f"n_tasks={self.n_tasks}, n_usvs={self.n_usvs}"
+            )
+
+        for name in (
+            'usv_features', 'task_features', 'edge_features',
+            'old_log_probs', 'advantages', 'returns'
+        ):
+            if not torch.isfinite(batch[name]).all():
+                raise ValueError(f"Non-finite values detected in PPO update batch: {name}")
+
+    def _slice_update_batch(self, batch: Dict[str, torch.Tensor],
+                            indices: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Slice state tensors on CPU for one mini-batch."""
+        return {
+            'usv_features': batch['usv_features'][indices],
+            'task_features': batch['task_features'][indices],
+            'edge_features': batch['edge_features'][indices],
+        }
+
+    def _to_device_state(self, state_tensor: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Move one sliced mini-batch state to the training device."""
+        return {
+            key: value.to(self.device, non_blocking=True)
+            for key, value in state_tensor.items()
+        }
+
+    def _update_vectorized(self) -> Dict[str, float]:
+        """Batched mini-batch PPO update."""
+        prepare_start = time.monotonic()
+        batch = self._build_update_batch()
+        batch_prepare_time = time.monotonic() - prepare_start
+
+        n_samples = batch['actions_flat'].size(0)
+        batch_size = max(int(self.config.train.get('update_batch_size', 128)), 1)
+        update_shuffle = self.config.train.get('update_shuffle', True)
+
+        actor_losses = []
+        critic_losses = []
+        entropies = []
+        actor_update_time = 0.0
+        critic_update_time = 0.0
+
+        if self.use_shared_encoder:
+            for _ in range(self.ppo_epochs):
+                order = (
+                    torch.randperm(n_samples)
+                    if update_shuffle else torch.arange(n_samples)
+                )
+                for start in range(0, n_samples, batch_size):
+                    idx = order[start:start + batch_size]
+                    step_start = time.monotonic()
+                    self.shared_optimizer.zero_grad()
+
+                    state_tensor = self._to_device_state(self._slice_update_batch(batch, idx))
+                    returns = batch['returns'][idx].to(self.device, non_blocking=True)
+                    advantages = batch['advantages'][idx].to(self.device, non_blocking=True)
+                    old_log_probs = batch['old_log_probs'][idx].to(self.device, non_blocking=True)
+                    actions_flat = batch['actions_flat'][idx].to(self.device, non_blocking=True)
+                    pair_masks = batch['pair_masks'][idx].to(self.device, non_blocking=True)
+                    encoded = self.actor_encoder(state_tensor)
+                    values = self.critic(encoded['graph_embed'])
+                    critic_loss = nn.SmoothL1Loss()(values, returns)
+
+                    new_log_probs, entropy, _ = self.actor.get_batch_action_log_prob(
+                        encoded,
+                        state_tensor['edge_features'],
+                        pair_masks,
+                        actions_flat,
+                    )
+                    ratio = torch.exp(new_log_probs - old_log_probs)
+                    surr1 = ratio * advantages
+                    surr2 = torch.clamp(
+                        ratio,
+                        1 - self.clip_epsilon,
+                        1 + self.clip_epsilon
+                    ) * advantages
+                    actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy.mean()
+                    total_loss = actor_loss + critic_loss
+                    total_loss.backward()
+
+                    torch.nn.utils.clip_grad_norm_(
+                        list(self.actor_encoder.parameters()) +
+                        list(self.actor.parameters()) +
+                        list(self.critic.parameters()),
+                        max_norm=self.grad_clip
+                    )
+                    self.shared_optimizer.step()
+                    elapsed = time.monotonic() - step_start
+                    # Shared encoder uses one combined backward pass; split timing
+                    # only for log readability so actor+critic roughly matches update time.
+                    actor_update_time += elapsed * 0.5
+                    critic_update_time += elapsed * 0.5
+                    actor_losses.append(actor_loss.item())
+                    critic_losses.append(critic_loss.item())
+                    entropies.append(entropy.mean().item())
+        else:
+            for _ in range(self.ppo_epochs):
+                order = (
+                    torch.randperm(n_samples)
+                    if update_shuffle else torch.arange(n_samples)
+                )
+
+                for start in range(0, n_samples, batch_size):
+                    idx = order[start:start + batch_size]
+                    step_start = time.monotonic()
+                    self.critic_optimizer.zero_grad()
+                    state_tensor = self._to_device_state(self._slice_update_batch(batch, idx))
+                    returns = batch['returns'][idx].to(self.device, non_blocking=True)
+                    critic_encoded = self.critic_encoder(state_tensor)
+                    values = self.critic(critic_encoded['graph_embed'])
+                    critic_loss = nn.SmoothL1Loss()(values, returns)
+                    critic_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        list(self.critic_encoder.parameters()) + list(self.critic.parameters()),
+                        max_norm=self.grad_clip
+                    )
+                    self.critic_optimizer.step()
+                    critic_update_time += time.monotonic() - step_start
+                    critic_losses.append(critic_loss.item())
+
+                for start in range(0, n_samples, batch_size):
+                    idx = order[start:start + batch_size]
+                    step_start = time.monotonic()
+                    self.actor_optimizer.zero_grad()
+                    state_tensor = self._to_device_state(self._slice_update_batch(batch, idx))
+                    advantages = batch['advantages'][idx].to(self.device, non_blocking=True)
+                    old_log_probs = batch['old_log_probs'][idx].to(self.device, non_blocking=True)
+                    actions_flat = batch['actions_flat'][idx].to(self.device, non_blocking=True)
+                    pair_masks = batch['pair_masks'][idx].to(self.device, non_blocking=True)
+                    actor_encoded = self.actor_encoder(state_tensor)
+                    new_log_probs, entropy, _ = self.actor.get_batch_action_log_prob(
+                        actor_encoded,
+                        state_tensor['edge_features'],
+                        pair_masks,
+                        actions_flat,
+                    )
+                    ratio = torch.exp(new_log_probs - old_log_probs)
+                    surr1 = ratio * advantages
+                    surr2 = torch.clamp(
+                        ratio,
+                        1 - self.clip_epsilon,
+                        1 + self.clip_epsilon
+                    ) * advantages
+                    actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy.mean()
+                    actor_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        list(self.actor_encoder.parameters()) + list(self.actor.parameters()),
+                        max_norm=self.grad_clip
+                    )
+                    self.actor_optimizer.step()
+                    actor_update_time += time.monotonic() - step_start
+                    actor_losses.append(actor_loss.item())
+                    entropies.append(entropy.mean().item())
+
+        self.update_count += 1
+        self.reset_buffer()
+
+        return {
+            'actor_loss': np.mean(actor_losses) if actor_losses else 0.0,
+            'critic_loss': np.mean(critic_losses) if critic_losses else 0.0,
+            'entropy': np.mean(entropies) if entropies else 0.0,
+            'batch_prepare_time_sec': batch_prepare_time,
+            'actor_update_time_sec': actor_update_time,
+            'critic_update_time_sec': critic_update_time,
+        }
+
+    def legacy_update(self) -> Dict[str, float]:
+        """
+        Perform the original sample-by-sample PPO update.
         
         Actor and Critic are updated separately with their own encoders.
         This prevents gradient interference and ensures stable learning.
@@ -553,8 +779,8 @@ class PPOAgent:
         }
     
     def save(self, path: str):
-        """Save checkpoint."""
-        torch.save({
+        """Save checkpoint robustly and return the actual saved path."""
+        payload = {
             'variant': self.variant,
             'actor_encoder': self.actor_encoder.state_dict(),
             'critic_encoder': None if self.use_shared_encoder else self.critic_encoder.state_dict(),
@@ -565,7 +791,40 @@ class PPOAgent:
             'actor_scheduler': self.actor_scheduler.state_dict(),
             'critic_scheduler': None if self.use_shared_encoder else self.critic_scheduler.state_dict(),
             'update_count': self.update_count
-        }, path)
+        }
+
+        path = os.path.abspath(path)
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+
+        temp_path = f"{path}.tmp.{os.getpid()}"
+        try:
+            torch.save(payload, temp_path)
+            os.replace(temp_path, path)
+            return path
+        except (OSError, RuntimeError) as exc:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+            root, ext = os.path.splitext(path)
+            fallback_path = f"{root}_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}{ext or '.pth'}"
+            try:
+                torch.save(payload, fallback_path)
+                print(
+                    f"[Checkpoint Warning] Could not save to {path}: {exc}. "
+                    f"Saved fallback checkpoint to {fallback_path}."
+                )
+                return fallback_path
+            except (OSError, RuntimeError) as fallback_exc:
+                raise RuntimeError(
+                    f"Failed to save checkpoint to {path}. "
+                    f"Primary error: {exc}. "
+                    f"Fallback error: {fallback_exc}."
+                ) from fallback_exc
     
     def load(self, path: str):
         """Load checkpoint."""

@@ -15,12 +15,15 @@ import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import random
+import time
 import torch
 import numpy as np
 
 from config import get_config
 from env import USVSchedulingEnv
+from parallel_rollout import ParallelRolloutCollector
 from ppo import PPOAgent
+from training_logger import TrainingCSVLogger, make_training_run_id
 from utils import load_instance_from_config, plot_gantt_chart
 
 
@@ -182,50 +185,6 @@ def evaluate_agent_once(agent: PPOAgent, instance: dict) -> dict:
     return {'makespan': makespan, 'success': success, 'steps': step}
 
 
-def collect_trajectory(env: USVSchedulingEnv, agent: PPOAgent):
-    """
-    Collect a single trajectory.
-    
-    Returns:
-        ep_reward: Episode reward
-        makespan: Final makespan
-        success: Whether all tasks scheduled
-    """
-    state = env.reset()
-    done = False
-    ep_reward = 0
-    step = 0
-    max_steps = env.n_tasks * 10
-    info = {}
-    
-    while not done and step < max_steps:
-        task_mask, usv_masks = agent._get_masks(env)
-        action, log_prob, value = agent.select_action(env, state, deterministic=False)
-        task_id, usv_id = action
-        
-        next_state, reward, done, info = env.step(task_id, usv_id)
-        
-        agent.store_transition(
-            state_dict=state,
-            action=action,
-            log_prob=log_prob,
-            reward=reward,
-            done=done,
-            value=value,
-            task_mask=task_mask,
-            usv_masks=usv_masks
-        )
-        
-        state = next_state
-        ep_reward += reward
-        step += 1
-    
-    success = env.n_scheduled_tasks == env.n_tasks
-    makespan = info.get('makespan', 5000.0) if success else 5000.0
-    
-    return ep_reward, makespan, success
-
-
 def train(cfg):
     """Main PPO training function with deterministic evaluation."""
     os.makedirs(cfg.model_dir, exist_ok=True)
@@ -272,8 +231,20 @@ def train(cfg):
     n_trajectories = cfg.train.get('n_trajectories', 8)
     eval_interval = cfg.train.get('eval_interval', 10)
     seed = cfg.train.get('seed', 0)
+    rollout_collector = ParallelRolloutCollector(cfg, n_trajectories)
     variant_tag = '' if variant == 'full' else f'_{variant}'
     best_model_path = os.path.join(cfg.model_dir, f'best_{instance_id}{variant_tag}_seed{seed}.pth')
+    run_id = make_training_run_id('PPO', variant, instance_id, seed)
+    csv_logger = None
+    training_log_path = None
+    training_log_interval = max(int(cfg.train.get('training_log_interval', 1)), 1)
+    training_start_time = time.monotonic()
+    if cfg.train.get('save_training_csv', True):
+        csv_logger = TrainingCSVLogger(
+            log_dir=cfg.train.get('training_log_dir', os.path.join(cfg.result_dir, 'training_logs')),
+            run_id=run_id,
+        )
+        training_log_path = csv_logger.path
     
     # Print configuration
     print(f"\n[Training] Instance ID={fixed_instance.get('instance_id', 'N/A')}")
@@ -284,10 +255,18 @@ def train(cfg):
     print(f"[Config] Hidden={cfg.network.hidden_dim}, HGNN_layers={cfg.network.hgnn_layers}")
     print(f"[Config] Reward normalization={getattr(fixed_instance['config'], 'reward_normalization', True)}")
     print(f"[Config] PPO_epochs={cfg.train.ppo_epochs}, Trajectories={n_trajectories}")
+    print(
+        f"[Update] Vectorized={cfg.train.get('vectorized_update', True)}, "
+        f"batch_size={cfg.train.get('update_batch_size', 128)}, "
+        f"shuffle={cfg.train.get('update_shuffle', True)}"
+    )
+    print(f"[Rollout] Parallel workers={rollout_collector.num_workers}, device={rollout_collector.device}")
     print(f"[Config] LR: encoder={cfg.train.lr_encoder}, actor={cfg.train.lr_actor}, critic={cfg.train.lr_critic}")
     print(f"[Config] Entropy_coef={cfg.train.entropy_coef}")
     print(f"[Baseline] Best={baseline['best_rule_name']} {baseline['best_rule_makespan']:.2f}")
     print(f"[Baseline] Random={baseline['random_mean']:.2f}")
+    if training_log_path:
+        print(f"[CSV] Training log: {training_log_path}")
     print("-" * 70)
     
     if viz and viz.enabled:
@@ -307,7 +286,10 @@ def train(cfg):
                 f'HGNN layers: {cfg.network.hgnn_layers}',
                 f'Reward normalization: {getattr(fixed_instance["config"], "reward_normalization", True)}',
                 f'PPO epochs: {cfg.train.ppo_epochs}',
+                f'Vectorized update: {cfg.train.get("vectorized_update", True)}',
+                f'Update batch size: {cfg.train.get("update_batch_size", 128)}',
                 f'Trajectories/update: {n_trajectories}',
+                f'Parallel rollout workers: {rollout_collector.num_workers}',
                 f'LR encoder: {cfg.train.lr_encoder}',
                 f'LR actor: {cfg.train.lr_actor}',
                 f'LR critic: {cfg.train.lr_critic}',
@@ -316,9 +298,11 @@ def train(cfg):
         )
 
     initial_eval = evaluate_agent_once(agent, fixed_instance)
+    best_eval_epoch = None
     if initial_eval['success']:
         best_eval_makespan = initial_eval['makespan']
-        agent.save(best_model_path)
+        best_eval_epoch = 0
+        best_model_path = agent.save(best_model_path)
         agent.save(os.path.join(cfg.model_dir, 'best_model.pth'))
         initial_gap = (
             (best_eval_makespan - baseline['best_rule_makespan']) /
@@ -332,22 +316,69 @@ def train(cfg):
                 'Random Makespan': baseline['random_makespan'],
                 'Gap vs Best Rule (%)': initial_gap,
             })
+    else:
+        initial_gap = None
+
+    if csv_logger is not None:
+        lr_info = agent.get_lr_info()
+        csv_logger.log({
+            'run_id': run_id,
+            'algorithm': 'PPO',
+            'variant': variant,
+            'instance_id': instance_id,
+            'n_usvs': fixed_instance['n_usvs'],
+            'n_tasks': fixed_instance['n_tasks'],
+            'seed': seed,
+            'epoch': 0,
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'elapsed_sec': time.monotonic() - training_start_time,
+            'eval_makespan': initial_eval['makespan'] if initial_eval['success'] else None,
+            'eval_success': initial_eval['success'],
+            'best_eval_makespan': best_eval_makespan,
+            'best_eval_epoch': best_eval_epoch,
+            'gap_to_best_rule_percent': initial_gap,
+            'best_rule_name': baseline['best_rule_name'],
+            'best_rule_makespan': baseline['best_rule_makespan'],
+            'random_makespan': baseline['random_makespan'],
+            'lr_actor_encoder': lr_info.get('LR Actor Encoder'),
+            'lr_actor': lr_info.get('LR Actor'),
+            'lr_critic_encoder': lr_info.get('LR Critic Encoder'),
+            'lr_critic': lr_info.get('LR Critic'),
+            'lr_shared_encoder': lr_info.get('LR Shared Encoder'),
+            'hidden_dim': cfg.network.hidden_dim,
+            'hgnn_layers': cfg.network.hgnn_layers,
+            'n_heads': cfg.network.get('n_heads', 4),
+            'ppo_epochs': cfg.train.ppo_epochs,
+            'vectorized_update': cfg.train.get('vectorized_update', True),
+            'update_batch_size': cfg.train.get('update_batch_size', 128),
+            'update_shuffle': cfg.train.get('update_shuffle', True),
+            'gamma': cfg.train.gamma,
+            'gae_lambda': cfg.train.gae_lambda,
+            'clip_epsilon': cfg.train.epsilon,
+            'entropy_coef': cfg.train.entropy_coef,
+            'reward_normalization': getattr(fixed_instance['config'], 'reward_normalization', True),
+            'best_model_path': best_model_path,
+        })
     
     # Training loop
     for epoch in range(1, cfg.train.max_epochs + 1):
+        epoch_start = time.monotonic()
         # ============ COLLECT MULTIPLE TRAJECTORIES ============
-        epoch_rewards = []
-        epoch_makespans = []
-        
-        for _ in range(n_trajectories):
-            env = USVSchedulingEnv(fixed_instance)
-            ep_reward, makespan, success = collect_trajectory(env, agent)
-            epoch_rewards.append(ep_reward)
-            if success:
-                epoch_makespans.append(makespan)
+        rollout_start = time.monotonic()
+        rollout_info = rollout_collector.collect(
+            agent=agent,
+            instance=fixed_instance,
+            epoch=epoch,
+            train_seed=seed,
+        )
+        epoch_rewards = rollout_info['epoch_rewards']
+        epoch_makespans = rollout_info['epoch_makespans']
+        rollout_time_sec = time.monotonic() - rollout_start
         
         # ============ PPO UPDATE ============
+        update_start = time.monotonic()
         loss_info = agent.update()
+        update_time_sec = time.monotonic() - update_start
         
         # Learning rate decay
         if epoch % cfg.train.lr_decay_step == 0:
@@ -355,16 +386,22 @@ def train(cfg):
         
         # Statistics
         avg_reward = np.mean(epoch_rewards)
+        std_reward = np.std(epoch_rewards) if epoch_rewards else 0.0
         avg_makespan = np.mean(epoch_makespans) if epoch_makespans else 5000.0
         min_makespan = np.min(epoch_makespans) if epoch_makespans else 5000.0
+        std_makespan = np.std(epoch_makespans) if epoch_makespans else 0.0
+        n_success = len(epoch_makespans)
+        n_failed = n_trajectories - n_success
         success_rate = len(epoch_makespans) / n_trajectories
         eval_makespan = None
+        eval_success = None
         gap_percent = None
         
         # ============ DETERMINISTIC EVALUATION ============
         if epoch == 1 or epoch % eval_interval == 0:
             eval_result = evaluate_agent_once(agent, fixed_instance)
             eval_makespan = eval_result['makespan']
+            eval_success = eval_result['success']
             gap_percent = (
                 (eval_makespan - baseline['best_rule_makespan']) /
                 baseline['best_rule_makespan'] * 100.0
@@ -372,8 +409,10 @@ def train(cfg):
             
             if eval_result['success'] and eval_makespan < best_eval_makespan:
                 best_eval_makespan = eval_makespan
-                agent.save(best_model_path)
+                best_eval_epoch = epoch
+                best_model_path = agent.save(best_model_path)
                 agent.save(os.path.join(cfg.model_dir, 'best_model.pth'))
+        epoch_time_sec = time.monotonic() - epoch_start
         
         # Visdom logging
         if viz and loss_info:
@@ -388,9 +427,78 @@ def train(cfg):
                 'Actor Loss': loss_info['actor_loss'],
                 'Critic Loss': loss_info['critic_loss'],
                 'Entropy': loss_info.get('entropy', 0),
+                'Rollout Time (s)': rollout_time_sec,
+                'Update Time (s)': update_time_sec,
+                'Epoch Time (s)': epoch_time_sec,
+                'Batch Prepare Time (s)': loss_info.get('batch_prepare_time_sec'),
+                'Actor Update Time (s)': loss_info.get('actor_update_time_sec'),
+                'Critic Update Time (s)': loss_info.get('critic_update_time_sec'),
             }
             metrics.update(agent.get_lr_info())
             viz.log_metrics(epoch, metrics)
+
+        # CSV logging
+        if (
+            csv_logger is not None and
+            (epoch == 1 or epoch % training_log_interval == 0 or eval_makespan is not None)
+        ):
+            lr_info = agent.get_lr_info()
+            csv_logger.log({
+                'run_id': run_id,
+                'algorithm': 'PPO',
+                'variant': variant,
+                'instance_id': instance_id,
+                'n_usvs': fixed_instance['n_usvs'],
+                'n_tasks': fixed_instance['n_tasks'],
+                'seed': seed,
+                'epoch': epoch,
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                'elapsed_sec': time.monotonic() - training_start_time,
+                'train_reward_avg': avg_reward,
+                'train_reward_std': std_reward,
+                'train_makespan_avg': avg_makespan,
+                'train_makespan_min': min_makespan,
+                'train_makespan_std': std_makespan,
+                'success_rate': success_rate,
+                'n_trajectories': n_trajectories,
+                'n_success': n_success,
+                'n_failed': n_failed,
+                'eval_makespan': eval_makespan,
+                'eval_success': eval_success,
+                'best_eval_makespan': best_eval_makespan,
+                'best_eval_epoch': best_eval_epoch,
+                'gap_to_best_rule_percent': gap_percent,
+                'best_rule_name': baseline['best_rule_name'],
+                'best_rule_makespan': baseline['best_rule_makespan'],
+                'random_makespan': baseline['random_makespan'],
+                'actor_loss': loss_info['actor_loss'],
+                'critic_loss': loss_info['critic_loss'],
+                'entropy': loss_info.get('entropy', 0),
+                'lr_actor_encoder': lr_info.get('LR Actor Encoder'),
+                'lr_actor': lr_info.get('LR Actor'),
+                'lr_critic_encoder': lr_info.get('LR Critic Encoder'),
+                'lr_critic': lr_info.get('LR Critic'),
+                'lr_shared_encoder': lr_info.get('LR Shared Encoder'),
+                'hidden_dim': cfg.network.hidden_dim,
+                'hgnn_layers': cfg.network.hgnn_layers,
+                'n_heads': cfg.network.get('n_heads', 4),
+                'ppo_epochs': cfg.train.ppo_epochs,
+                'vectorized_update': cfg.train.get('vectorized_update', True),
+                'update_batch_size': cfg.train.get('update_batch_size', 128),
+                'update_shuffle': cfg.train.get('update_shuffle', True),
+                'gamma': cfg.train.gamma,
+                'gae_lambda': cfg.train.gae_lambda,
+                'clip_epsilon': cfg.train.epsilon,
+                'entropy_coef': cfg.train.entropy_coef,
+                'reward_normalization': getattr(fixed_instance['config'], 'reward_normalization', True),
+                'best_model_path': best_model_path,
+                'rollout_time_sec': rollout_time_sec,
+                'update_time_sec': update_time_sec,
+                'epoch_time_sec': epoch_time_sec,
+                'batch_prepare_time_sec': loss_info.get('batch_prepare_time_sec'),
+                'actor_update_time_sec': loss_info.get('actor_update_time_sec'),
+                'critic_update_time_sec': loss_info.get('critic_update_time_sec'),
+            })
         
         # Console logging
         if epoch % cfg.train.log_interval == 0:
@@ -405,17 +513,23 @@ def train(cfg):
             print(f"Ep {epoch:4d} | R:{avg_reward:7.3f} | "
                   f"MS:{avg_makespan:7.1f} (min:{min_makespan:7.1f}) | "
                   f"BestEval:{best_eval_makespan:7.1f}{eval_str} | "
-                  f"SR:{success_rate:.0%} {loss_str}")
+                  f"SR:{success_rate:.0%} | "
+                  f"T:{epoch_time_sec:.1f}s/Roll:{rollout_time_sec:.1f}s/Upd:{update_time_sec:.1f}s {loss_str}")
     
     print("-" * 70)
     print(f"[Done] Best Eval Makespan: {best_eval_makespan:.2f}")
     print(f"[Done] Best Rule Makespan: {baseline['best_rule_makespan']:.2f}")
+    rollout_collector.close()
+    if csv_logger is not None:
+        csv_logger.close()
     
     return agent, fixed_instance, {
         'baseline': baseline,
         'best_eval_makespan': best_eval_makespan,
         'best_model_path': best_model_path,
         'variant': variant,
+        'training_log_path': training_log_path,
+        'run_id': run_id,
     }
 
 
@@ -543,7 +657,7 @@ if __name__ == "__main__":
         n_usvs=2,
         n_tasks=20,
         data_dir='data/public',
-        max_epochs=500,
+        max_epochs=1000,
         seed=0,
         
         # Network architecture
@@ -555,6 +669,12 @@ if __name__ == "__main__":
         # Training parameters
         ppo_epochs=4,
         n_trajectories=8,
+        rollout_num_workers=0,
+        rollout_device='cpu',
+        rollout_torch_threads=1,
+        vectorized_update=True,
+        update_batch_size=128,
+        update_shuffle=True,
         lr_encoder=1e-4,
         lr_actor=3e-4,
         lr_critic=3e-4,
