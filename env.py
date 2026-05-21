@@ -463,9 +463,16 @@ class USVSchedulingEnv:
         
         # Scale rewards by instance time scale to stabilize PPO/Critic.
         current_makespan = self._compute_makespan()
-        reward = (self.last_makespan - current_makespan) / self.scale_time
+        reward_delta = self.last_makespan - current_makespan
+        if getattr(self.config, 'reward_normalization', True):
+            reward = reward_delta / self.scale_time
+        else:
+            reward = reward_delta
         if done and self.n_scheduled_tasks == self.n_tasks:
-            reward -= current_makespan / self.scale_time
+            if getattr(self.config, 'reward_normalization', True):
+                reward -= current_makespan / self.scale_time
+            else:
+                reward -= current_makespan
         self.last_makespan = current_makespan
         
         return self._get_state(), reward, done, {'makespan': current_makespan}

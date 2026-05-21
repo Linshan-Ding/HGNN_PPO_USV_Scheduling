@@ -147,6 +147,7 @@ def load_instance_from_config(cfg) -> dict:
     2. cfg.data.instance_id
     3. cfg.instance.n_usvs + cfg.instance.n_tasks + cfg.data.instance_index
     """
+    reward_normalization = getattr(cfg.instance, 'reward_normalization', True)
     loader = InstanceLoader(
         data_dir=cfg.data.data_dir,
         n_usvs=cfg.instance.n_usvs,
@@ -156,6 +157,8 @@ def load_instance_from_config(cfg) -> dict:
     )
     instance = loader.get_instance(cfg.data.instance_index)
     cfg.instance = instance['config']
+    cfg.instance.reward_normalization = reward_normalization
+    instance['config'].reward_normalization = reward_normalization
     return instance
 
 

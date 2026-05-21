@@ -234,6 +234,7 @@ def train(cfg):
     set_global_seed(cfg.train.get('seed', 0))
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"[Device] {device}")
+    variant = cfg.network.get('ablation_variant', 'full')
     
     # Load selected public CSV instance
     fixed_instance = load_instance_from_config(cfg)
@@ -249,13 +250,15 @@ def train(cfg):
         random_seed=cfg.train.get('baseline_seed', 20260519)
     )
     
-    # Initialize agent with dual encoders
+    # Initialize agent
     agent = PPOAgent(cfg, fixed_instance['n_usvs'], fixed_instance['n_tasks'])
     
     # Visdom logger
     viz = None
     if cfg.train.use_visdom:
         visdom_env = cfg.train.visdom_env
+        if variant != 'full' and variant not in visdom_env:
+            visdom_env = f"{visdom_env}_{variant}"
         if instance_tag not in visdom_env:
             visdom_env = f"{visdom_env}_{instance_tag}"
         viz = VisdomLogger(
@@ -269,14 +272,17 @@ def train(cfg):
     n_trajectories = cfg.train.get('n_trajectories', 8)
     eval_interval = cfg.train.get('eval_interval', 10)
     seed = cfg.train.get('seed', 0)
-    best_model_path = os.path.join(cfg.model_dir, f'best_{instance_id}_seed{seed}.pth')
+    variant_tag = '' if variant == 'full' else f'_{variant}'
+    best_model_path = os.path.join(cfg.model_dir, f'best_{instance_id}{variant_tag}_seed{seed}.pth')
     
     # Print configuration
     print(f"\n[Training] Instance ID={fixed_instance.get('instance_id', 'N/A')}")
     print(f"[Training] Instance seed={fixed_instance.get('seed', 'N/A')}")
     print(f"[Training] Train seed={seed}")
+    print(f"[Training] Variant={variant}")
     print(f"[Config] USVs={fixed_instance['n_usvs']}, Tasks={fixed_instance['n_tasks']}")
     print(f"[Config] Hidden={cfg.network.hidden_dim}, HGNN_layers={cfg.network.hgnn_layers}")
+    print(f"[Config] Reward normalization={getattr(fixed_instance['config'], 'reward_normalization', True)}")
     print(f"[Config] PPO_epochs={cfg.train.ppo_epochs}, Trajectories={n_trajectories}")
     print(f"[Config] LR: encoder={cfg.train.lr_encoder}, actor={cfg.train.lr_actor}, critic={cfg.train.lr_critic}")
     print(f"[Config] Entropy_coef={cfg.train.entropy_coef}")
@@ -289,6 +295,7 @@ def train(cfg):
             'Training Config',
             '<br>'.join([
                 '<b>USV Scheduling PPO Training</b>',
+                f'Variant: {variant}',
                 f'Instance ID: {fixed_instance.get("instance_id", "N/A")}',
                 f'Instance seed: {fixed_instance.get("seed", "N/A")}',
                 f'Train seed: {seed}',
@@ -298,6 +305,7 @@ def train(cfg):
                 f'Random: {baseline["random_makespan"]:.2f}',
                 f'Hidden dim: {cfg.network.hidden_dim}',
                 f'HGNN layers: {cfg.network.hgnn_layers}',
+                f'Reward normalization: {getattr(fixed_instance["config"], "reward_normalization", True)}',
                 f'PPO epochs: {cfg.train.ppo_epochs}',
                 f'Trajectories/update: {n_trajectories}',
                 f'LR encoder: {cfg.train.lr_encoder}',
@@ -369,10 +377,7 @@ def train(cfg):
         
         # Visdom logging
         if viz and loss_info:
-            actor_encoder_lr = agent.actor_optimizer.param_groups[0]['lr']
-            actor_lr = agent.actor_optimizer.param_groups[1]['lr']
-            critic_lr = agent.critic_optimizer.param_groups[1]['lr']
-            viz.log_metrics(epoch, {
+            metrics = {
                 'Reward (Avg)': avg_reward,
                 'Train Makespan': avg_makespan,
                 'Eval Makespan': eval_makespan,
@@ -383,10 +388,9 @@ def train(cfg):
                 'Actor Loss': loss_info['actor_loss'],
                 'Critic Loss': loss_info['critic_loss'],
                 'Entropy': loss_info.get('entropy', 0),
-                'LR Actor Encoder': actor_encoder_lr,
-                'LR Actor': actor_lr,
-                'LR Critic': critic_lr,
-            })
+            }
+            metrics.update(agent.get_lr_info())
+            viz.log_metrics(epoch, metrics)
         
         # Console logging
         if epoch % cfg.train.log_interval == 0:
@@ -411,6 +415,7 @@ def train(cfg):
         'baseline': baseline,
         'best_eval_makespan': best_eval_makespan,
         'best_model_path': best_model_path,
+        'variant': variant,
     }
 
 

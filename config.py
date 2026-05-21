@@ -23,6 +23,7 @@ class InstanceConfig:
     charge_time: float = 10.0                                   # Charging duration
     energy_cost_per_distance: float = 1.0                       # Energy per distance
     energy_cost_per_task_time: float = 5.0                      # Energy per task time
+    reward_normalization: bool = True                           # Scale rewards by time scale
 
     def get(self, key: str, default=None):
         """Get attribute with default fallback."""
@@ -52,6 +53,7 @@ class NetworkConfig:
     n_heads: int = 4                                            # Number of attention heads
     dropout: float = 0.1                                        # Dropout rate
     mlp_hidden_dims: List[int] = field(default_factory=lambda: [128, 64])
+    ablation_variant: str = 'full'                              # full/no_hgnn/shared_encoder/no_reward_norm
     
     # Dual encoder architecture is enabled by default
     # Both actor and critic have their own HGNN encoder
@@ -153,6 +155,9 @@ def get_config(**kwargs) -> Config:
     # Network config
     network_kwargs = {k: v for k, v in kwargs.items() if k in network_fields}
     network = NetworkConfig(**network_kwargs)
+
+    if network.ablation_variant == 'no_reward_norm':
+        instance.reward_normalization = False
     
     # Train config
     train_kwargs = {k: v for k, v in kwargs.items() if k in train_fields}

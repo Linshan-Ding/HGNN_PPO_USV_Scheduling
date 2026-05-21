@@ -2,13 +2,13 @@
 
 本项目研究多无人船（USV）协同任务调度问题：多艘无人船从原点充电站出发，在航行能耗、作业能耗、电池容量和自动返航充电约束下完成一组任务，优化目标为最小化所有无人船完成任务并返回后的最大完工时间（makespan）。
 
-当前代码采用“公开固定算例 + 启发式规则基线 + Pairwise Actor + PPO + deterministic evaluation”的训练框架。根据近期训练结果，项目已移除行为克隆预训练逻辑，默认从随机初始化策略直接进行 PPO 训练。
+当前主算法为 `Pairwise Actor + PPO`。项目保留简单调度规则基线，并新增两个对比算法集目录：`drl_baselines/` 用于组织深度强化学习对比算法，`metaheuristic_baselines/` 用于组织元启发式对比算法。DRL 对比算法已有单实例训练入口；未完整实现的算法默认不会进入正式 public25 实验结果。
 
 ## 当前实验目标
 
 投稿实验的核心目标为：在 25 个公开 CSV 算例上，PPO 收敛后的 deterministic 最优 checkpoint 的多随机种子均值低于该实例的最优调度规则，并在 25 个实例上通过 Wilcoxon signed-rank test（单侧，`PPO < Best Rule`，`p < 0.05`）。
 
-训练前会自动运行以下调度规则作为基线：
+训练前会自动运行以下简单调度规则作为基线：
 
 - `MinBattery_NearestTask`
 - `MaxBattery_NearestTask`
@@ -18,7 +18,7 @@
 
 所有规则均只运行 1 次；`best_rule_makespan` 取这 5 个单次运行结果中的最优值。`Random` 不再重复运行，也不再取多次随机结果中的最小值。
 
-## 算法框架
+## 算法体系
 
 ```text
 Public CSV instance
@@ -26,21 +26,88 @@ Public CSV instance
         v
 USV scheduling environment
         |
-        v
-HGNN actor encoder  -> Pairwise Actor -> legal (task, usv) distribution
-HGNN critic encoder -> Critic         -> V(s)
-        |
-        v
-PPO update + deterministic evaluation checkpoint
+        +-- Main method: Pairwise Actor + PPO
+        +-- Simple rules: scheduling_rules.py
+        +-- DRL baselines: drl_baselines/
+        +-- Metaheuristic baselines: metaheuristic_baselines/
 ```
 
-新版 Actor 直接对每个合法 `(task, usv)` 动作对打分：
+主算法中的 Actor 直接对每个合法 `(task, usv)` 动作对打分：
 
 ```text
 score(t, u) = MLP([task_embed[t], usv_embed[u], edge_feat[u,t], graph_embed])
 ```
 
-然后对所有合法 pair 做联合 softmax，PPO 的 `action`、`log_prob` 和 `entropy` 均基于该合法 pair 分布计算。这样可以避免“先选任务、再选无人船”造成的局部匹配信息丢失。
+然后对所有合法 pair 做联合 softmax，PPO 的 `action`、`log_prob` 和 `entropy` 均基于该合法 pair 分布计算。
+
+## 对比算法集目录
+
+`drl_baselines/` 用于深度强化学习对比算法，当前包含可运行实现：
+
+- `A2C`
+- `DQN`
+- `DDQN`
+- `REINFORCE`
+
+DRL 统一接口：
+
+```python
+algorithm.train(instance, cfg)
+algorithm.evaluate(instance, cfg)
+algorithm.save(path)
+algorithm.load(path)
+```
+
+`metaheuristic_baselines/` 用于元启发式对比算法，当前包含模板：
+
+- `GA`
+- `PSO`
+- `ACO`
+- `SA`
+
+元启发式模板统一接口：
+
+```python
+algorithm.solve(instance, cfg)
+```
+
+两类算法都使用 `baseline_protocol.py` 中的 `AlgorithmResult` 作为统一结果格式：
+
+```text
+algorithm_name, category, instance_id, n_usvs, n_tasks,
+makespan, success, runtime_sec, seed
+```
+
+每个算法集目录都有 `registry.py`。默认 `list_algorithms()` 只返回已经实现并验证的算法；DRL 目录当前会返回 `A2C`、`DDQN`、`DQN`、`REINFORCE`，元启发式目录当前仍是占位模板，默认不会进入正式实验。若需要查看全部占位算法，可使用：
+
+```python
+from drl_baselines import registry as drl_registry
+from metaheuristic_baselines import registry as meta_registry
+
+print(drl_registry.list_algorithms(include_unimplemented=True))
+print(meta_registry.list_algorithms(include_unimplemented=True))
+```
+
+本轮明确不加入 A3C 作为对比算法，避免引入异步多进程训练带来的工程复杂度和论文口径争议。
+
+单独运行一个 DRL 对比算法：
+
+```bash
+python -m drl_baselines.run --algorithm DDQN --n-usvs 2 --n-tasks 20 --max-epochs 100 --seed 0
+```
+
+该命令会读取对应 public 算例，训练单个 DRL baseline，并在 `results/` 中保存单实例结果 CSV。
+DRL baseline 默认启用 Visdom 实时曲线，env 会自动命名为：
+
+```text
+drl_baselines_{algorithm}_{instance_id}
+```
+
+例如 `drl_baselines_DDQN_u2_t20`。主要曲线包括 `Train Makespan`、`Eval Makespan`、`Best Eval Makespan`、`Success Rate`，以及算法对应的 `Actor Loss`、`Critic Loss`、`Entropy` 或 `Q Loss`、`Epsilon`。如需关闭 Visdom：
+
+```bash
+python -m drl_baselines.run --algorithm DDQN --no-visdom
+```
 
 ## 公开算例
 
@@ -87,7 +154,7 @@ battery_capacity = 1.20 * max(single_trip_energy_j)
 pip install -r requirements.txt
 ```
 
-训练需要 PyTorch；若只运行启发式规则，只需基础科学计算依赖。
+训练主 PPO 需要 PyTorch；若只运行启发式规则或对比算法接口 smoke test，只需基础科学计算依赖。
 
 若需要实时训练曲线，先启动 Visdom：
 
@@ -149,33 +216,6 @@ evaluate(cfg, agent, instance)
 
 训练会在开始前计算启发式基线，并每 `eval_interval` 个 epoch 做一次 deterministic evaluation。checkpoint 只根据 deterministic `Eval Makespan` 保存，不根据训练采样 makespan 保存。
 
-Visdom 环境会按实例自动命名，例如：
-
-```text
-usv_training_u4_t60
-```
-
-主要曲线包括：
-
-- `Train Makespan`
-- `Eval Makespan`
-- `Best Rule Makespan`
-- `Random Makespan`
-- `Gap vs Best Rule (%)`
-- `Actor Loss`
-- `Critic Loss`
-- `Entropy`
-
-## 启发式规则基线
-
-运行：
-
-```bash
-python scheduling_rules.py
-```
-
-脚本会读取当前配置对应的 public 算例，评估全部调度规则，并在 `results/` 保存甘特图。
-
 ## 25 个公开算例批量实验
 
 运行完整 public25 实验：
@@ -204,20 +244,78 @@ gap_percent = (ppo_mean - best_rule_makespan) / best_rule_makespan * 100
 
 投稿目标要求 25 个实例的 `gap_percent` 均为负数，并且 Wilcoxon 单侧检验 `p < 0.05`。
 
+## 消融实验
+
+当前消融实验保留三种核心变体：
+
+- `no_hgnn`：用轻量 MLP/Linear 节点编码器替代 `HGNNEncoder`，保留 Pairwise Actor。
+- `shared_encoder`：Actor 与 Critic 共用同一个 `HGNNEncoder`，共享 encoder 只进入一个优化器。
+- `no_reward_norm`：保留完整网络结构，但关闭奖励尺度归一化，使用原始 makespan 奖励。
+
+运行单实例消融实验：
+
+```bash
+python ablation_experiment.py --variants full,no_hgnn,shared_encoder,no_reward_norm --n-usvs 4 --n-tasks 60 --max-epochs 500 --seeds 0,1,2,3,4
+```
+
+输出文件：
+
+```text
+results/ablation_summary.csv
+```
+
+字段包括：
+
+```text
+variant,instance_id,n_usvs,n_tasks,seed,best_eval_makespan,
+best_rule_name,best_rule_makespan,gap_to_rule_percent,
+gap_to_full_percent,success
+```
+
+若需要消融实验的 Visdom 实时曲线，添加 `--visdom`。env 会按变体和算例命名，例如：
+
+```text
+usv_ablation_no_hgnn_u4_t60
+```
+
+## 测试与检查
+
+检查新增对比算法接口：
+
+```bash
+python -m unittest tests.test_baseline_interfaces tests.test_ablation_variants
+```
+
+运行启发式规则基线：
+
+```bash
+python scheduling_rules.py
+```
+
+检查 Python 文件语法：
+
+```bash
+python -m py_compile baseline_protocol.py public25_experiment.py ablation_experiment.py
+```
+
 ## 主要文件
 
 ```text
-config.py              配置定义
-env.py                 调度环境、能耗约束、自动充电、状态与奖励归一化
-hgnn.py                异构图神经网络编码器
-mlp.py                 Pairwise Actor 与 Critic
-ppo.py                 PPO 智能体
-main.py                单实例训练、评估、Visdom 和基线集成
-public25_experiment.py 25 个公开算例批量训练与统计检验
-scheduling_rules.py    启发式调度规则
-instance_generator.py  public CSV 算例生成与电池容量验证
-utils.py               CSV 算例加载与甘特图绘制
-data/public/           25 个公开 CSV 算例
+config.py                    配置定义
+env.py                       调度环境、能耗约束、自动充电、状态与奖励归一化
+hgnn.py                      异构图神经网络编码器
+mlp.py                       Pairwise Actor 与 Critic
+ppo.py                       PPO 智能体
+main.py                      单实例训练、评估、Visdom 和基线集成
+public25_experiment.py       25 个公开算例批量训练与统计检验
+ablation_experiment.py       三种 PPO 消融变体训练与结果汇总
+scheduling_rules.py          简单启发式调度规则
+baseline_protocol.py         对比算法统一结果协议
+drl_baselines/               深度强化学习对比算法集
+metaheuristic_baselines/     元启发式对比算法集
+instance_generator.py        public CSV 算例生成与电池容量验证
+utils.py                     CSV 算例加载与甘特图绘制
+data/public/                 25 个公开 CSV 算例
 ```
 
 ## 后续论文实验建议
@@ -231,11 +329,7 @@ data/public/           25 个公开 CSV 算例
 - 多种子均值与标准差
 - Wilcoxon signed-rank test 的 `p_value`
 
-建议消融实验包括：
+建议后续扩展对比算法时遵循两个原则：
 
-- Pairwise Actor vs 旧层级 Actor
-- 有/无状态与奖励归一化
-- 不同 `n_trajectories`
-- 不同 `entropy_coef`
-- 不同电池容量 safety factor
-
+- 只有 `implemented=True` 且通过 smoke test、可复现验证的算法才进入正式论文表。
+- 深度强化学习与元启发式算法均输出统一 `AlgorithmResult`，便于汇总到同一 public25 结果表。

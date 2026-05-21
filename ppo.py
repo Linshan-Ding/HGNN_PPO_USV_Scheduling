@@ -25,6 +25,54 @@ from hgnn import HGNNEncoder
 from mlp import PairwiseActor, Critic
 
 
+VALID_ABLATION_VARIANTS = {'full', 'no_hgnn', 'shared_encoder', 'no_reward_norm'}
+
+
+class SimpleGraphEncoder(nn.Module):
+    """
+    Lightweight non-HGNN encoder for the NoHGNN ablation.
+
+    It maps normalized USV and task node features independently, then builds a
+    graph embedding by mean-pooling both node sets. The output keys and tensor
+    dimensions match HGNNEncoder so the PairwiseActor and Critic are unchanged.
+    """
+
+    def __init__(self, usv_feat_dim: int = 7, task_feat_dim: int = 8,
+                 hidden_dim: int = 64, dropout: float = 0.1):
+        super().__init__()
+        self.usv_encoder = nn.Sequential(
+            nn.Linear(usv_feat_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+        )
+        self.task_encoder = nn.Sequential(
+            nn.Linear(task_feat_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+        )
+
+    def forward(self, state_dict: dict) -> dict:
+        usv_embed = self.usv_encoder(state_dict['usv_features'])
+        task_embed = self.task_encoder(state_dict['task_features'])
+        graph_embed = torch.cat(
+            [usv_embed.mean(dim=0), task_embed.mean(dim=0)],
+            dim=-1,
+        )
+        return {
+            'usv_embed': usv_embed,
+            'task_embed': task_embed,
+            'graph_embed': graph_embed,
+        }
+
+
 class PPOAgent:
     """PPO agent with separate encoders for actor and critic."""
     
@@ -41,39 +89,32 @@ class PPOAgent:
         self.n_usvs = n_usvs
         self.n_tasks = n_tasks
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.variant = config.network.get('ablation_variant', 'full')
+        if self.variant not in VALID_ABLATION_VARIANTS:
+            raise ValueError(
+                f"Unknown ablation_variant={self.variant}. "
+                f"Expected one of {sorted(VALID_ABLATION_VARIANTS)}"
+            )
+        self.use_shared_encoder = self.variant == 'shared_encoder'
         
         # Hyperparameters
         self.gamma = config.train.gamma
         self.gae_lambda = config.train.gae_lambda
         self.clip_epsilon = config.train.epsilon
         self.entropy_coef = config.train.get('entropy_coef', 0.01)
+        self.value_coef = config.train.get('value_coef', 0.5)
         self.grad_clip = config.train.grad_clip
         self.ppo_epochs = config.train.ppo_epochs
         
         hidden_dim = config.network.hidden_dim
         
-        # ============ DUAL ENCODER ARCHITECTURE ============
-        # Actor Encoder - dedicated HGNN for policy
-        self.actor_encoder = HGNNEncoder(
-            usv_feat_dim=7,
-            task_feat_dim=8,
-            edge_feat_dim=4,
-            hidden_dim=hidden_dim,
-            num_layers=config.network.hgnn_layers,
-            num_heads=config.network.get('n_heads', 4),
-            dropout=config.network.get('dropout', 0.1)
-        ).to(self.device)
-        
-        # Critic Encoder - dedicated HGNN for value estimation
-        self.critic_encoder = HGNNEncoder(
-            usv_feat_dim=7,
-            task_feat_dim=8,
-            edge_feat_dim=4,
-            hidden_dim=hidden_dim,
-            num_layers=config.network.hgnn_layers,
-            num_heads=config.network.get('n_heads', 4),
-            dropout=config.network.get('dropout', 0.1)
-        ).to(self.device)
+        # ============ ENCODER ARCHITECTURE ============
+        if self.use_shared_encoder:
+            self.actor_encoder = self._build_encoder(hidden_dim).to(self.device)
+            self.critic_encoder = self.actor_encoder
+        else:
+            self.actor_encoder = self._build_encoder(hidden_dim).to(self.device)
+            self.critic_encoder = self._build_encoder(hidden_dim).to(self.device)
         
         # Actor network (joint legal pair policy)
         self.actor = PairwiseActor(
@@ -91,44 +132,89 @@ class PPOAgent:
             dropout=config.network.get('dropout', 0.1)
         ).to(self.device)
         
-        # ============ SEPARATE OPTIMIZERS ============
+        # ============ OPTIMIZERS ============
         lr_actor = config.train.lr_actor
         lr_critic = config.train.get('lr_critic', lr_actor)
         lr_encoder = config.train.get('lr_encoder', lr_actor * 0.5)
-        
-        # Actor optimizer: actor_encoder + actor
-        self.actor_optimizer = optim.AdamW([
-            {'params': self.actor_encoder.parameters(), 'lr': lr_encoder},
-            {'params': self.actor.parameters(), 'lr': lr_actor}
-        ], weight_decay=1e-4, eps=1e-5)
-        
-        # Critic optimizer: critic_encoder + critic
-        self.critic_optimizer = optim.AdamW([
-            {'params': self.critic_encoder.parameters(), 'lr': lr_encoder},
-            {'params': self.critic.parameters(), 'lr': lr_critic}
-        ], weight_decay=1e-4, eps=1e-5)
-        
-        # Learning rate schedulers
-        self.actor_scheduler = optim.lr_scheduler.StepLR(
-            self.actor_optimizer,
-            step_size=config.train.get('lr_decay_step', 100),
-            gamma=config.train.get('lr_decay_gamma', 0.95)
-        )
-        self.critic_scheduler = optim.lr_scheduler.StepLR(
-            self.critic_optimizer,
-            step_size=config.train.get('lr_decay_step', 100),
-            gamma=config.train.get('lr_decay_gamma', 0.95)
-        )
+
+        if self.use_shared_encoder:
+            self.shared_optimizer = optim.AdamW([
+                {'params': self.actor_encoder.parameters(), 'lr': lr_encoder, 'name': 'shared_encoder'},
+                {'params': self.actor.parameters(), 'lr': lr_actor, 'name': 'actor'},
+                {'params': self.critic.parameters(), 'lr': lr_critic, 'name': 'critic'},
+            ], weight_decay=1e-4, eps=1e-5)
+            self.actor_optimizer = self.shared_optimizer
+            self.critic_optimizer = None
+            self.actor_scheduler = optim.lr_scheduler.StepLR(
+                self.shared_optimizer,
+                step_size=config.train.get('lr_decay_step', 100),
+                gamma=config.train.get('lr_decay_gamma', 0.95)
+            )
+            self.critic_scheduler = None
+        else:
+            # Actor optimizer: actor_encoder + actor
+            self.actor_optimizer = optim.AdamW([
+                {'params': self.actor_encoder.parameters(), 'lr': lr_encoder, 'name': 'actor_encoder'},
+                {'params': self.actor.parameters(), 'lr': lr_actor, 'name': 'actor'}
+            ], weight_decay=1e-4, eps=1e-5)
+
+            # Critic optimizer: critic_encoder + critic
+            self.critic_optimizer = optim.AdamW([
+                {'params': self.critic_encoder.parameters(), 'lr': lr_encoder, 'name': 'critic_encoder'},
+                {'params': self.critic.parameters(), 'lr': lr_critic, 'name': 'critic'}
+            ], weight_decay=1e-4, eps=1e-5)
+
+            # Learning rate schedulers
+            self.actor_scheduler = optim.lr_scheduler.StepLR(
+                self.actor_optimizer,
+                step_size=config.train.get('lr_decay_step', 100),
+                gamma=config.train.get('lr_decay_gamma', 0.95)
+            )
+            self.critic_scheduler = optim.lr_scheduler.StepLR(
+                self.critic_optimizer,
+                step_size=config.train.get('lr_decay_step', 100),
+                gamma=config.train.get('lr_decay_gamma', 0.95)
+            )
         
         # Experience buffer
         self.reset_buffer()
         self.update_count = 0
         
-        print(f"[PPO] Dual Encoder Architecture:")
+        print(f"[PPO] Variant: {self.variant}")
+        print(f"[PPO] Encoder Architecture: {self._encoder_name()}")
         print(f"  - Actor Encoder: {sum(p.numel() for p in self.actor_encoder.parameters())} params")
-        print(f"  - Critic Encoder: {sum(p.numel() for p in self.critic_encoder.parameters())} params")
+        if self.use_shared_encoder:
+            print(f"  - Critic Encoder: shared with Actor Encoder")
+        else:
+            print(f"  - Critic Encoder: {sum(p.numel() for p in self.critic_encoder.parameters())} params")
         print(f"  - Actor: {sum(p.numel() for p in self.actor.parameters())} params")
         print(f"  - Critic: {sum(p.numel() for p in self.critic.parameters())} params")
+
+    def _build_encoder(self, hidden_dim: int) -> nn.Module:
+        """Build the encoder selected by the current ablation variant."""
+        if self.variant == 'no_hgnn':
+            return SimpleGraphEncoder(
+                usv_feat_dim=7,
+                task_feat_dim=8,
+                hidden_dim=hidden_dim,
+                dropout=self.config.network.get('dropout', 0.1)
+            )
+        return HGNNEncoder(
+            usv_feat_dim=7,
+            task_feat_dim=8,
+            edge_feat_dim=4,
+            hidden_dim=hidden_dim,
+            num_layers=self.config.network.hgnn_layers,
+            num_heads=self.config.network.get('n_heads', 4),
+            dropout=self.config.network.get('dropout', 0.1)
+        )
+
+    def _encoder_name(self) -> str:
+        if self.variant == 'no_hgnn':
+            return 'SimpleGraphEncoder'
+        if self.variant == 'shared_encoder':
+            return 'Shared HGNNEncoder'
+        return 'Dual HGNNEncoder'
     
     def reset_buffer(self):
         """Clear experience buffer."""
@@ -249,6 +335,9 @@ class PPOAgent:
         """
         if len(self.states) == 0:
             return {'actor_loss': 0, 'critic_loss': 0, 'entropy': 0}
+
+        if self.use_shared_encoder:
+            return self._update_shared_encoder()
         
         # Compute GAE
         advantages, returns = self.compute_gae()
@@ -353,29 +442,128 @@ class PPOAgent:
             'entropy': np.mean(entropies)
         }
 
+    def _update_shared_encoder(self) -> Dict[str, float]:
+        """
+        PPO update for the SharedEncoder ablation.
+
+        The encoder appears in a single optimizer and receives the combined
+        actor and critic gradients once per PPO epoch.
+        """
+        advantages, returns = self.compute_gae()
+        old_log_probs = torch.tensor(self.log_probs, dtype=torch.float32, device=self.device)
+
+        all_states = [copy.deepcopy(s) for s in self.states]
+        all_actions = self.actions.copy()
+        all_usv_masks = [m.clone() for m in self.usv_masks_list]
+
+        actor_losses = []
+        critic_losses = []
+        entropies = []
+        n_samples = len(all_states)
+
+        for _ in range(self.ppo_epochs):
+            self.shared_optimizer.zero_grad()
+
+            total_actor_loss = 0
+            total_critic_loss = 0
+            total_entropy = 0
+
+            for idx in range(n_samples):
+                state_tensor = self._prepare_state(all_states[idx])
+                action = all_actions[idx]
+                usv_masks = all_usv_masks[idx]
+
+                encoded = self.actor_encoder(state_tensor)
+
+                new_value = self.critic(encoded['graph_embed'])
+                critic_loss = nn.SmoothL1Loss()(new_value, returns[idx])
+
+                new_log_prob, entropy, _ = self.actor.get_action_log_prob(
+                    encoded,
+                    state_tensor['edge_features'],
+                    usv_masks,
+                    action
+                )
+                ratio = torch.exp(new_log_prob - old_log_probs[idx])
+                surr1 = ratio * advantages[idx]
+                surr2 = torch.clamp(
+                    ratio,
+                    1 - self.clip_epsilon,
+                    1 + self.clip_epsilon
+                ) * advantages[idx]
+                actor_loss = -torch.min(surr1, surr2) - self.entropy_coef * entropy
+
+                total_actor_loss += actor_loss
+                total_critic_loss += critic_loss
+                total_entropy += entropy.detach()
+
+            total_actor_loss = total_actor_loss / n_samples
+            total_critic_loss = total_critic_loss / n_samples
+            total_loss = total_actor_loss + total_critic_loss
+            total_loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(
+                list(self.actor_encoder.parameters()) +
+                list(self.actor.parameters()) +
+                list(self.critic.parameters()),
+                max_norm=self.grad_clip
+            )
+            self.shared_optimizer.step()
+
+            actor_losses.append(total_actor_loss.item())
+            critic_losses.append(total_critic_loss.item())
+            entropies.append((total_entropy / n_samples).item())
+
+        self.update_count += 1
+        self.reset_buffer()
+
+        return {
+            'actor_loss': np.mean(actor_losses),
+            'critic_loss': np.mean(critic_losses),
+            'entropy': np.mean(entropies)
+        }
+
     def decay_lr(self):
         """Step learning rate schedulers."""
         self.actor_scheduler.step()
-        self.critic_scheduler.step()
+        if self.critic_scheduler is not None:
+            self.critic_scheduler.step()
     
     def get_lr(self) -> Tuple[float, float]:
         """Get current learning rates."""
         return (
             self.actor_optimizer.param_groups[0]['lr'],
-            self.critic_optimizer.param_groups[0]['lr']
+            self.actor_optimizer.param_groups[-1]['lr'] if self.use_shared_encoder
+            else self.critic_optimizer.param_groups[0]['lr']
         )
+
+    def get_lr_info(self) -> Dict[str, float]:
+        """Return named learning rates for logging."""
+        if self.use_shared_encoder:
+            return {
+                'LR Shared Encoder': self.shared_optimizer.param_groups[0]['lr'],
+                'LR Actor': self.shared_optimizer.param_groups[1]['lr'],
+                'LR Critic': self.shared_optimizer.param_groups[2]['lr'],
+            }
+        return {
+            'LR Actor Encoder': self.actor_optimizer.param_groups[0]['lr'],
+            'LR Actor': self.actor_optimizer.param_groups[1]['lr'],
+            'LR Critic Encoder': self.critic_optimizer.param_groups[0]['lr'],
+            'LR Critic': self.critic_optimizer.param_groups[1]['lr'],
+        }
     
     def save(self, path: str):
         """Save checkpoint."""
         torch.save({
+            'variant': self.variant,
             'actor_encoder': self.actor_encoder.state_dict(),
-            'critic_encoder': self.critic_encoder.state_dict(),
+            'critic_encoder': None if self.use_shared_encoder else self.critic_encoder.state_dict(),
             'actor': self.actor.state_dict(),
             'critic': self.critic.state_dict(),
             'actor_optimizer': self.actor_optimizer.state_dict(),
-            'critic_optimizer': self.critic_optimizer.state_dict(),
+            'critic_optimizer': None if self.use_shared_encoder else self.critic_optimizer.state_dict(),
             'actor_scheduler': self.actor_scheduler.state_dict(),
-            'critic_scheduler': self.critic_scheduler.state_dict(),
+            'critic_scheduler': None if self.use_shared_encoder else self.critic_scheduler.state_dict(),
             'update_count': self.update_count
         }, path)
     
@@ -384,16 +572,19 @@ class PPOAgent:
         checkpoint = torch.load(path, map_location=self.device)
         
         self.actor_encoder.load_state_dict(checkpoint['actor_encoder'])
-        self.critic_encoder.load_state_dict(checkpoint['critic_encoder'])
+        if not self.use_shared_encoder and checkpoint.get('critic_encoder') is not None:
+            self.critic_encoder.load_state_dict(checkpoint['critic_encoder'])
         self.actor.load_state_dict(checkpoint['actor'])
         self.critic.load_state_dict(checkpoint['critic'])
         
         if 'actor_optimizer' in checkpoint:
             self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer'])
-            self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
+            if not self.use_shared_encoder and checkpoint.get('critic_optimizer') is not None:
+                self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
         if 'actor_scheduler' in checkpoint:
             self.actor_scheduler.load_state_dict(checkpoint['actor_scheduler'])
-            self.critic_scheduler.load_state_dict(checkpoint['critic_scheduler'])
+            if not self.use_shared_encoder and checkpoint.get('critic_scheduler') is not None:
+                self.critic_scheduler.load_state_dict(checkpoint['critic_scheduler'])
             self.update_count = checkpoint.get('update_count', 0)
     
     def get_actor_embedding(self, state_dict: Dict) -> torch.Tensor:
