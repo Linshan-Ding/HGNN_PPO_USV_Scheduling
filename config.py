@@ -94,6 +94,8 @@ class TrainConfig:
     ppo_epochs: int = 4                       # PPO update epochs per batch
     vectorized_update: bool = True            # Batched mini-batch PPO update
     update_batch_size: int = 128              # Mini-batch size for vectorized update
+    update_micro_batch_size: int = 0          # 0 = auto, split logical batch by max_update_pairs
+    max_update_pairs: int = 32768             # Limit pairs per micro-batch, not logical batch
     update_shuffle: bool = True               # Shuffle transitions during PPO update
     
     # Multi-trajectory collection

@@ -365,8 +365,8 @@ def print_results(results: dict):
 def main():
     """Main function for baseline evaluation."""
     cfg = get_config(
-        n_usvs=2,
-        n_tasks=20,
+        n_usvs=10,
+        n_tasks=100,
         data_dir='data/public',
     )
     

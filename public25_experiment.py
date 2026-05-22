@@ -119,6 +119,8 @@ def run_public25(args) -> List[dict]:
                 rollout_torch_threads=args.rollout_torch_threads,
                 vectorized_update=not args.legacy_update,
                 update_batch_size=args.update_batch_size,
+                update_micro_batch_size=args.update_micro_batch_size,
+                max_update_pairs=args.max_update_pairs,
                 update_shuffle=not args.no_update_shuffle,
             )
 
@@ -194,6 +196,8 @@ def build_parser():
     parser.add_argument('--rollout-torch-threads', type=int, default=1)
     parser.add_argument('--legacy-update', action='store_true')
     parser.add_argument('--update-batch-size', type=int, default=128)
+    parser.add_argument('--update-micro-batch-size', type=int, default=0)
+    parser.add_argument('--max-update-pairs', type=int, default=32768)
     parser.add_argument('--no-update-shuffle', action='store_true')
     return parser
 

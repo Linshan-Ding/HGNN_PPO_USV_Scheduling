@@ -258,6 +258,8 @@ def train(cfg):
     print(
         f"[Update] Vectorized={cfg.train.get('vectorized_update', True)}, "
         f"batch_size={cfg.train.get('update_batch_size', 128)}, "
+        f"micro_batch_size={cfg.train.get('update_micro_batch_size', 0)}, "
+        f"max_pairs={cfg.train.get('max_update_pairs', 32768)}, "
         f"shuffle={cfg.train.get('update_shuffle', True)}"
     )
     print(f"[Rollout] Parallel workers={rollout_collector.num_workers}, device={rollout_collector.device}")
@@ -288,6 +290,8 @@ def train(cfg):
                 f'PPO epochs: {cfg.train.ppo_epochs}',
                 f'Vectorized update: {cfg.train.get("vectorized_update", True)}',
                 f'Update batch size: {cfg.train.get("update_batch_size", 128)}',
+                f'Update micro-batch size: {cfg.train.get("update_micro_batch_size", 0)}',
+                f'Max update pairs: {cfg.train.get("max_update_pairs", 32768)}',
                 f'Trajectories/update: {n_trajectories}',
                 f'Parallel rollout workers: {rollout_collector.num_workers}',
                 f'LR encoder: {cfg.train.lr_encoder}',
@@ -351,6 +355,8 @@ def train(cfg):
             'ppo_epochs': cfg.train.ppo_epochs,
             'vectorized_update': cfg.train.get('vectorized_update', True),
             'update_batch_size': cfg.train.get('update_batch_size', 128),
+            'update_micro_batch_size': cfg.train.get('update_micro_batch_size', 0),
+            'max_update_pairs': cfg.train.get('max_update_pairs', 32768),
             'update_shuffle': cfg.train.get('update_shuffle', True),
             'gamma': cfg.train.gamma,
             'gae_lambda': cfg.train.gae_lambda,
@@ -433,6 +439,8 @@ def train(cfg):
                 'Batch Prepare Time (s)': loss_info.get('batch_prepare_time_sec'),
                 'Actor Update Time (s)': loss_info.get('actor_update_time_sec'),
                 'Critic Update Time (s)': loss_info.get('critic_update_time_sec'),
+                'Effective Update Batch Size': loss_info.get('effective_update_batch_size'),
+                'Effective Update Micro Batch Size': loss_info.get('effective_update_micro_batch_size'),
             }
             metrics.update(agent.get_lr_info())
             viz.log_metrics(epoch, metrics)
@@ -485,6 +493,8 @@ def train(cfg):
                 'ppo_epochs': cfg.train.ppo_epochs,
                 'vectorized_update': cfg.train.get('vectorized_update', True),
                 'update_batch_size': cfg.train.get('update_batch_size', 128),
+                'update_micro_batch_size': cfg.train.get('update_micro_batch_size', 0),
+                'max_update_pairs': cfg.train.get('max_update_pairs', 32768),
                 'update_shuffle': cfg.train.get('update_shuffle', True),
                 'gamma': cfg.train.gamma,
                 'gae_lambda': cfg.train.gae_lambda,
@@ -498,6 +508,9 @@ def train(cfg):
                 'batch_prepare_time_sec': loss_info.get('batch_prepare_time_sec'),
                 'actor_update_time_sec': loss_info.get('actor_update_time_sec'),
                 'critic_update_time_sec': loss_info.get('critic_update_time_sec'),
+                'effective_update_batch_size': loss_info.get('effective_update_batch_size'),
+                'effective_update_micro_batch_size': loss_info.get('effective_update_micro_batch_size'),
+                'pairs_per_state': loss_info.get('pairs_per_state'),
             })
         
         # Console logging
@@ -654,8 +667,8 @@ def compare_with_heuristics(cfg, agent=None, instance=None):
 if __name__ == "__main__":
     cfg = get_config(
         # Problem size
-        n_usvs=2,
-        n_tasks=20,
+        n_usvs=10,
+        n_tasks=100,
         data_dir='data/public',
         max_epochs=1000,
         seed=0,
@@ -674,6 +687,8 @@ if __name__ == "__main__":
         rollout_torch_threads=1,
         vectorized_update=True,
         update_batch_size=128,
+        update_micro_batch_size=0,
+        max_update_pairs=32768,
         update_shuffle=True,
         lr_encoder=1e-4,
         lr_actor=3e-4,

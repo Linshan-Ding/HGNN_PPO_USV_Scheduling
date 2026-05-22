@@ -43,7 +43,12 @@ NUMERIC_COLUMNS = [
     'critic_update_time_sec',
     'vectorized_update',
     'update_batch_size',
+    'update_micro_batch_size',
+    'max_update_pairs',
     'update_shuffle',
+    'effective_update_batch_size',
+    'effective_update_micro_batch_size',
+    'pairs_per_state',
 ]
 
 

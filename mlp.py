@@ -355,17 +355,21 @@ class PairwiseActor(nn.Module):
         pair_inputs = torch.cat([task_exp, usv_exp, edge_tu, graph_exp], dim=-1)
         logits = self.scorer(pair_inputs).squeeze(-1)
 
-        masked_logits = logits.clone()
-        masked_logits[~pair_mask] = float('-inf')
-
         flat_mask = pair_mask.reshape(batch_size, -1)
-        flat_logits = masked_logits.reshape(batch_size, -1)
-        flat_probs = torch.zeros(batch_size, n_tasks * n_usvs, device=device)
-        has_legal = flat_mask.sum(dim=1) > 0
-        if has_legal.any():
-            flat_probs[has_legal] = F.softmax(flat_logits[has_legal], dim=-1)
+        flat_logits = logits.reshape(batch_size, -1)
+        mask_value = torch.finfo(flat_logits.dtype).min
+        masked_flat_logits = flat_logits.masked_fill(~flat_mask, mask_value)
+        flat_probs = F.softmax(masked_flat_logits, dim=-1)
+        flat_probs = flat_probs * flat_mask.to(dtype=flat_probs.dtype)
+        normalizer = flat_probs.sum(dim=1, keepdim=True)
+        flat_probs = torch.where(
+            normalizer > 0,
+            flat_probs / normalizer.clamp_min(1e-12),
+            torch.zeros_like(flat_probs),
+        )
 
         probs = flat_probs.view(batch_size, n_tasks, n_usvs)
+        masked_logits = masked_flat_logits.view(batch_size, n_tasks, n_usvs)
         if squeeze_batch:
             return masked_logits.squeeze(0), probs.squeeze(0)
         return masked_logits, probs

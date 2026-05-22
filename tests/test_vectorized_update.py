@@ -59,7 +59,9 @@ class VectorizedUpdateSmokeTest(unittest.TestCase):
             n_heads=4,
             dropout=0.0,
             vectorized_update=True,
-            update_batch_size=2,
+            update_batch_size=3,
+            update_micro_batch_size=1,
+            max_update_pairs=40,
             ppo_epochs=1,
         )
         agent = PPOAgent(cfg, n_usvs=2, n_tasks=20, device='cpu', verbose=False)
@@ -84,6 +86,8 @@ class VectorizedUpdateSmokeTest(unittest.TestCase):
         self.assertIn('batch_prepare_time_sec', loss_info)
         self.assertIn('actor_update_time_sec', loss_info)
         self.assertIn('critic_update_time_sec', loss_info)
+        self.assertEqual(loss_info['effective_update_batch_size'], 3)
+        self.assertEqual(loss_info['effective_update_micro_batch_size'], 1)
         self.assertEqual(len(agent.states), 0)
 
 

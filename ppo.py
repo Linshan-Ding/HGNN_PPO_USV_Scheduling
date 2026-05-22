@@ -389,6 +389,20 @@ class PPOAgent:
                 f"n_tasks={self.n_tasks}, n_usvs={self.n_usvs}"
             )
 
+        flat_masks = batch['pair_masks'].reshape(n_samples, -1)
+        selected_is_legal = flat_masks[
+            torch.arange(n_samples),
+            batch['actions_flat'],
+        ]
+        if not selected_is_legal.all():
+            bad_idx = int((~selected_is_legal).nonzero(as_tuple=False)[0].item())
+            bad_action = int(batch['actions_flat'][bad_idx].item())
+            raise ValueError(
+                "PPO buffer contains an action that is not legal under its mask: "
+                f"transition_index={bad_idx}, action_flat={bad_action}, "
+                f"task_id={bad_action // self.n_usvs}, usv_id={bad_action % self.n_usvs}."
+            )
+
         for name in (
             'usv_features', 'task_features', 'edge_features',
             'old_log_probs', 'advantages', 'returns'
@@ -412,6 +426,37 @@ class PPOAgent:
             for key, value in state_tensor.items()
         }
 
+    def _resolve_update_batch_sizes(self, n_samples: int,
+                                    pairs_per_state: int) -> Tuple[int, int]:
+        """Resolve logical PPO batch size and memory-safe micro-batch size."""
+        logical_batch_size = min(
+            max(int(self.config.train.get('update_batch_size', 128)), 1),
+            n_samples,
+        )
+        configured_micro_batch_size = int(
+            self.config.train.get('update_micro_batch_size', 0) or 0
+        )
+        if configured_micro_batch_size <= 0:
+            configured_micro_batch_size = logical_batch_size
+
+        max_update_pairs = int(self.config.train.get('max_update_pairs', 32768) or 0)
+        if max_update_pairs > 0:
+            pair_limited_micro_batch_size = max(1, max_update_pairs // pairs_per_state)
+            micro_batch_size = min(
+                logical_batch_size,
+                configured_micro_batch_size,
+                pair_limited_micro_batch_size,
+            )
+        else:
+            micro_batch_size = min(logical_batch_size, configured_micro_batch_size)
+        return logical_batch_size, max(1, micro_batch_size)
+
+    def _iter_micro_indices(self, logical_indices: torch.Tensor,
+                            micro_batch_size: int):
+        """Yield CPU micro-batch indices inside one logical PPO batch."""
+        for start in range(0, logical_indices.numel(), micro_batch_size):
+            yield logical_indices[start:start + micro_batch_size]
+
     def _update_vectorized(self) -> Dict[str, float]:
         """Batched mini-batch PPO update."""
         prepare_start = time.monotonic()
@@ -419,7 +464,11 @@ class PPOAgent:
         batch_prepare_time = time.monotonic() - prepare_start
 
         n_samples = batch['actions_flat'].size(0)
-        batch_size = max(int(self.config.train.get('update_batch_size', 128)), 1)
+        pairs_per_state = max(int(self.n_tasks * self.n_usvs), 1)
+        batch_size, micro_batch_size = self._resolve_update_batch_sizes(
+            n_samples,
+            pairs_per_state,
+        )
         update_shuffle = self.config.train.get('update_shuffle', True)
 
         actor_losses = []
@@ -438,33 +487,44 @@ class PPOAgent:
                     idx = order[start:start + batch_size]
                     step_start = time.monotonic()
                     self.shared_optimizer.zero_grad()
+                    logical_n = idx.numel()
+                    actor_loss_value = 0.0
+                    critic_loss_value = 0.0
+                    entropy_value = 0.0
 
-                    state_tensor = self._to_device_state(self._slice_update_batch(batch, idx))
-                    returns = batch['returns'][idx].to(self.device, non_blocking=True)
-                    advantages = batch['advantages'][idx].to(self.device, non_blocking=True)
-                    old_log_probs = batch['old_log_probs'][idx].to(self.device, non_blocking=True)
-                    actions_flat = batch['actions_flat'][idx].to(self.device, non_blocking=True)
-                    pair_masks = batch['pair_masks'][idx].to(self.device, non_blocking=True)
-                    encoded = self.actor_encoder(state_tensor)
-                    values = self.critic(encoded['graph_embed'])
-                    critic_loss = nn.SmoothL1Loss()(values, returns)
+                    for micro_idx in self._iter_micro_indices(idx, micro_batch_size):
+                        micro_n = micro_idx.numel()
+                        weight = micro_n / logical_n
+                        state_tensor = self._to_device_state(self._slice_update_batch(batch, micro_idx))
+                        returns = batch['returns'][micro_idx].to(self.device, non_blocking=True)
+                        advantages = batch['advantages'][micro_idx].to(self.device, non_blocking=True)
+                        old_log_probs = batch['old_log_probs'][micro_idx].to(self.device, non_blocking=True)
+                        actions_flat = batch['actions_flat'][micro_idx].to(self.device, non_blocking=True)
+                        pair_masks = batch['pair_masks'][micro_idx].to(self.device, non_blocking=True)
 
-                    new_log_probs, entropy, _ = self.actor.get_batch_action_log_prob(
-                        encoded,
-                        state_tensor['edge_features'],
-                        pair_masks,
-                        actions_flat,
-                    )
-                    ratio = torch.exp(new_log_probs - old_log_probs)
-                    surr1 = ratio * advantages
-                    surr2 = torch.clamp(
-                        ratio,
-                        1 - self.clip_epsilon,
-                        1 + self.clip_epsilon
-                    ) * advantages
-                    actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy.mean()
-                    total_loss = actor_loss + critic_loss
-                    total_loss.backward()
+                        encoded = self.actor_encoder(state_tensor)
+                        values = self.critic(encoded['graph_embed'])
+                        critic_loss = nn.SmoothL1Loss()(values, returns)
+
+                        new_log_probs, entropy, _ = self.actor.get_batch_action_log_prob(
+                            encoded,
+                            state_tensor['edge_features'],
+                            pair_masks,
+                            actions_flat,
+                        )
+                        ratio = torch.exp(new_log_probs - old_log_probs)
+                        surr1 = ratio * advantages
+                        surr2 = torch.clamp(
+                            ratio,
+                            1 - self.clip_epsilon,
+                            1 + self.clip_epsilon
+                        ) * advantages
+                        actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy.mean()
+                        total_loss = actor_loss + critic_loss
+                        (total_loss * weight).backward()
+                        actor_loss_value += actor_loss.item() * weight
+                        critic_loss_value += critic_loss.item() * weight
+                        entropy_value += entropy.mean().item() * weight
 
                     torch.nn.utils.clip_grad_norm_(
                         list(self.actor_encoder.parameters()) +
@@ -478,9 +538,9 @@ class PPOAgent:
                     # only for log readability so actor+critic roughly matches update time.
                     actor_update_time += elapsed * 0.5
                     critic_update_time += elapsed * 0.5
-                    actor_losses.append(actor_loss.item())
-                    critic_losses.append(critic_loss.item())
-                    entropies.append(entropy.mean().item())
+                    actor_losses.append(actor_loss_value)
+                    critic_losses.append(critic_loss_value)
+                    entropies.append(entropy_value)
         else:
             for _ in range(self.ppo_epochs):
                 order = (
@@ -492,53 +552,67 @@ class PPOAgent:
                     idx = order[start:start + batch_size]
                     step_start = time.monotonic()
                     self.critic_optimizer.zero_grad()
-                    state_tensor = self._to_device_state(self._slice_update_batch(batch, idx))
-                    returns = batch['returns'][idx].to(self.device, non_blocking=True)
-                    critic_encoded = self.critic_encoder(state_tensor)
-                    values = self.critic(critic_encoded['graph_embed'])
-                    critic_loss = nn.SmoothL1Loss()(values, returns)
-                    critic_loss.backward()
+                    logical_n = idx.numel()
+                    critic_loss_value = 0.0
+                    for micro_idx in self._iter_micro_indices(idx, micro_batch_size):
+                        micro_n = micro_idx.numel()
+                        weight = micro_n / logical_n
+                        state_tensor = self._to_device_state(self._slice_update_batch(batch, micro_idx))
+                        returns = batch['returns'][micro_idx].to(self.device, non_blocking=True)
+                        critic_encoded = self.critic_encoder(state_tensor)
+                        values = self.critic(critic_encoded['graph_embed'])
+                        critic_loss = nn.SmoothL1Loss()(values, returns)
+                        (critic_loss * weight).backward()
+                        critic_loss_value += critic_loss.item() * weight
                     torch.nn.utils.clip_grad_norm_(
                         list(self.critic_encoder.parameters()) + list(self.critic.parameters()),
                         max_norm=self.grad_clip
                     )
                     self.critic_optimizer.step()
                     critic_update_time += time.monotonic() - step_start
-                    critic_losses.append(critic_loss.item())
+                    critic_losses.append(critic_loss_value)
 
                 for start in range(0, n_samples, batch_size):
                     idx = order[start:start + batch_size]
                     step_start = time.monotonic()
                     self.actor_optimizer.zero_grad()
-                    state_tensor = self._to_device_state(self._slice_update_batch(batch, idx))
-                    advantages = batch['advantages'][idx].to(self.device, non_blocking=True)
-                    old_log_probs = batch['old_log_probs'][idx].to(self.device, non_blocking=True)
-                    actions_flat = batch['actions_flat'][idx].to(self.device, non_blocking=True)
-                    pair_masks = batch['pair_masks'][idx].to(self.device, non_blocking=True)
-                    actor_encoded = self.actor_encoder(state_tensor)
-                    new_log_probs, entropy, _ = self.actor.get_batch_action_log_prob(
-                        actor_encoded,
-                        state_tensor['edge_features'],
-                        pair_masks,
-                        actions_flat,
-                    )
-                    ratio = torch.exp(new_log_probs - old_log_probs)
-                    surr1 = ratio * advantages
-                    surr2 = torch.clamp(
-                        ratio,
-                        1 - self.clip_epsilon,
-                        1 + self.clip_epsilon
-                    ) * advantages
-                    actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy.mean()
-                    actor_loss.backward()
+                    logical_n = idx.numel()
+                    actor_loss_value = 0.0
+                    entropy_value = 0.0
+                    for micro_idx in self._iter_micro_indices(idx, micro_batch_size):
+                        micro_n = micro_idx.numel()
+                        weight = micro_n / logical_n
+                        state_tensor = self._to_device_state(self._slice_update_batch(batch, micro_idx))
+                        advantages = batch['advantages'][micro_idx].to(self.device, non_blocking=True)
+                        old_log_probs = batch['old_log_probs'][micro_idx].to(self.device, non_blocking=True)
+                        actions_flat = batch['actions_flat'][micro_idx].to(self.device, non_blocking=True)
+                        pair_masks = batch['pair_masks'][micro_idx].to(self.device, non_blocking=True)
+                        actor_encoded = self.actor_encoder(state_tensor)
+                        new_log_probs, entropy, _ = self.actor.get_batch_action_log_prob(
+                            actor_encoded,
+                            state_tensor['edge_features'],
+                            pair_masks,
+                            actions_flat,
+                        )
+                        ratio = torch.exp(new_log_probs - old_log_probs)
+                        surr1 = ratio * advantages
+                        surr2 = torch.clamp(
+                            ratio,
+                            1 - self.clip_epsilon,
+                            1 + self.clip_epsilon
+                        ) * advantages
+                        actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy.mean()
+                        (actor_loss * weight).backward()
+                        actor_loss_value += actor_loss.item() * weight
+                        entropy_value += entropy.mean().item() * weight
                     torch.nn.utils.clip_grad_norm_(
                         list(self.actor_encoder.parameters()) + list(self.actor.parameters()),
                         max_norm=self.grad_clip
                     )
                     self.actor_optimizer.step()
                     actor_update_time += time.monotonic() - step_start
-                    actor_losses.append(actor_loss.item())
-                    entropies.append(entropy.mean().item())
+                    actor_losses.append(actor_loss_value)
+                    entropies.append(entropy_value)
 
         self.update_count += 1
         self.reset_buffer()
@@ -550,6 +624,9 @@ class PPOAgent:
             'batch_prepare_time_sec': batch_prepare_time,
             'actor_update_time_sec': actor_update_time,
             'critic_update_time_sec': critic_update_time,
+            'effective_update_batch_size': batch_size,
+            'effective_update_micro_batch_size': micro_batch_size,
+            'pairs_per_state': pairs_per_state,
         }
 
     def legacy_update(self) -> Dict[str, float]:

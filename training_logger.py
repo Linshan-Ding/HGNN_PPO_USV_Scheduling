@@ -50,6 +50,8 @@ TRAINING_LOG_FIELDS = [
     'ppo_epochs',
     'vectorized_update',
     'update_batch_size',
+    'update_micro_batch_size',
+    'max_update_pairs',
     'update_shuffle',
     'gamma',
     'gae_lambda',
@@ -63,6 +65,9 @@ TRAINING_LOG_FIELDS = [
     'batch_prepare_time_sec',
     'actor_update_time_sec',
     'critic_update_time_sec',
+    'effective_update_batch_size',
+    'effective_update_micro_batch_size',
+    'pairs_per_state',
 ]
 
 

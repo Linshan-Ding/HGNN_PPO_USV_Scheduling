@@ -235,6 +235,8 @@ PPO update 默认使用 mini-batch 向量化实现，避免逐 transition 重复
 cfg = get_config(
     vectorized_update=True,
     update_batch_size=128,
+    update_micro_batch_size=0,  # 0 表示按 max_update_pairs 自动切分 micro-batch
+    max_update_pairs=32768,
     update_shuffle=True,
 )
 ```
@@ -265,10 +267,12 @@ gap_to_best_rule_percent,best_rule_name,best_rule_makespan,
 random_makespan,actor_loss,critic_loss,entropy,
 lr_actor_encoder,lr_actor,lr_critic_encoder,lr_critic,
 lr_shared_encoder,hidden_dim,hgnn_layers,n_heads,ppo_epochs,
-vectorized_update,update_batch_size,update_shuffle,
+vectorized_update,update_batch_size,update_micro_batch_size,
+max_update_pairs,update_shuffle,
 gamma,gae_lambda,clip_epsilon,entropy_coef,reward_normalization,
 best_model_path,rollout_time_sec,update_time_sec,epoch_time_sec,
-batch_prepare_time_sec,actor_update_time_sec,critic_update_time_sec
+batch_prepare_time_sec,actor_update_time_sec,critic_update_time_sec,
+effective_update_batch_size,effective_update_micro_batch_size,pairs_per_state
 ```
 
 如需降低写入频率，可在配置中设置：
@@ -294,6 +298,8 @@ python public25_experiment.py --max-epochs 500 --seeds 0,1,2,3,4 --visdom
 ```bash
 python public25_experiment.py --max-epochs 500 --rollout-num-workers 4
 python public25_experiment.py --max-epochs 500 --update-batch-size 64
+python public25_experiment.py --max-epochs 500 --update-batch-size 128 --update-micro-batch-size 32
+python public25_experiment.py --max-epochs 500 --max-update-pairs 16384
 ```
 
 输出文件：
