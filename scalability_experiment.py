@@ -21,7 +21,7 @@ from typing import List
 import numpy as np
 
 from config import get_config
-from public25_experiment import _parse_seeds, wilcoxon_signed_rank_less
+from stats_utils import parse_seeds, wilcoxon_signed_rank_less
 
 # Unseen evaluation scales: fleet-size-only control (u12_t100) plus the
 # {10,12,15} x {150,200} grid beyond the largest training scale.
@@ -156,7 +156,7 @@ def evaluate_zero_shot(args, instance: dict, seeds: List[int]) -> dict:
 
 
 def run_scalability(args) -> List[dict]:
-    seeds = _parse_seeds(args.seeds)
+    seeds = parse_seeds(args.seeds)
     if args.smoke:
         seeds = seeds[:1]
     os.makedirs(args.result_dir, exist_ok=True)
