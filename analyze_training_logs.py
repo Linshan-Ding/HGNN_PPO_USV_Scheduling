@@ -10,6 +10,14 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 
+# Output format for all figures ('pdf' feeds the paper's figures/generated/
+# directory directly; override with --format png for quick previews).
+FIG_FORMAT = 'pdf'
+
+
+def _fig_path(output_dir: str, stem: str) -> str:
+    return os.path.join(output_dir, f'{stem}.{FIG_FORMAT}')
+
 
 NUMERIC_COLUMNS = [
     'n_usvs',
@@ -139,7 +147,7 @@ def plot_single_run(df: pd.DataFrame, output_dir: str):
     ax.legend()
     ax.grid(alpha=0.25)
     fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, f'run_{_safe_name(run_id)}_curves.png'), dpi=200)
+    fig.savefig(_fig_path(output_dir, f'run_{_safe_name(run_id)}_curves'), dpi=200)
     plt.close(fig)
 
 
@@ -170,7 +178,7 @@ def plot_mean_curves(frames: List[pd.DataFrame], output_dir: str):
         ax.grid(alpha=0.25)
         fig.tight_layout()
         fig.savefig(
-            os.path.join(output_dir, f'mean_curve_{_safe_name(instance_id)}_{_safe_name(variant)}.png'),
+            _fig_path(output_dir, f'mean_curve_{_safe_name(instance_id)}_{_safe_name(variant)}'),
             dpi=200
         )
         plt.close(fig)
@@ -200,7 +208,7 @@ def plot_ablation_curves(frames: List[pd.DataFrame], output_dir: str):
         ax.legend()
         ax.grid(alpha=0.25)
         fig.tight_layout()
-        fig.savefig(os.path.join(output_dir, f'ablation_{_safe_name(instance_id)}.png'), dpi=200)
+        fig.savefig(_fig_path(output_dir, f'ablation_{_safe_name(instance_id)}'), dpi=200)
         plt.close(fig)
 
 
@@ -223,14 +231,93 @@ def plot_gap_by_tasks(summary: pd.DataFrame, output_dir: str):
     ax.set_ylabel('Gap to Best Rule (%)')
     ax.grid(axis='y', alpha=0.25)
     fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, 'gap_by_tasks.png'), dpi=200)
+    fig.savefig(_fig_path(output_dir, 'gap_by_tasks'), dpi=200)
+    plt.close(fig)
+
+
+def plot_scalability(public25_csv: str, scalability_csv: str, output_dir: str):
+    """Two-panel generalization/scalability figure (paper fig:scalability).
+
+    (a) Gap to best rule (%) vs. task count, one line per fleet size; the
+        zero-shot region (task counts beyond the training scales) is shaded.
+    (b) Solution wall-time vs. task count on a log y-axis, Ours vs. Best rule,
+        merging the public-25 and scalability summary CSVs.
+    """
+    frames = []
+    for path, regime in ((public25_csv, 'training'), (scalability_csv, 'zero-shot')):
+        if path and os.path.exists(path):
+            df = pd.read_csv(path, encoding='utf-8-sig')
+            df['regime'] = regime
+            frames.append(df)
+    if not frames:
+        return
+    merged = pd.concat(frames, ignore_index=True)
+    merged['ppo_makespan'] = merged.get(
+        'ppo_mean', pd.Series(dtype=float)).combine_first(
+        merged.get('ppo_zero_shot_mean', pd.Series(dtype=float)))
+
+    train_max_tasks = None
+    if 'regime' in merged and (merged['regime'] == 'training').any():
+        train_max_tasks = merged.loc[merged['regime'] == 'training', 'n_tasks'].max()
+
+    fig, (ax_gap, ax_time) = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    for n_usvs, group in merged.dropna(subset=['gap_percent']).groupby('n_usvs'):
+        group = group.sort_values('n_tasks')
+        ax_gap.plot(group['n_tasks'], group['gap_percent'],
+                    marker='o', label=f'{int(n_usvs)} USVs')
+    ax_gap.axhline(0, color='tab:red', linestyle='--', linewidth=1)
+    if train_max_tasks is not None:
+        ax_gap.axvspan(train_max_tasks, merged['n_tasks'].max(),
+                       alpha=0.08, color='tab:orange', label='zero-shot')
+    ax_gap.set_xlabel('Number of Tasks')
+    ax_gap.set_ylabel('Gap to Best Rule (%)')
+    ax_gap.set_title('(a) Solution quality across scales')
+    ax_gap.legend(fontsize=8)
+    ax_gap.grid(alpha=0.25)
+
+    time_stats = merged.groupby('n_tasks').agg(
+        ours=('ppo_solve_time_mean_sec', 'mean'),
+        rule=('best_rule_solve_time_sec', 'mean'),
+    ).reset_index().dropna(how='all', subset=['ours', 'rule'])
+    if not time_stats.empty:
+        ax_time.plot(time_stats['n_tasks'], time_stats['ours'],
+                     marker='o', label='Ours')
+        ax_time.plot(time_stats['n_tasks'], time_stats['rule'],
+                     marker='s', label='Best rule')
+        ax_time.set_yscale('log')
+    if train_max_tasks is not None:
+        ax_time.axvspan(train_max_tasks, merged['n_tasks'].max(),
+                        alpha=0.08, color='tab:orange')
+    ax_time.set_xlabel('Number of Tasks')
+    ax_time.set_ylabel('Solution Time (s, log scale)')
+    ax_time.set_title('(b) Solution time across scales')
+    ax_time.legend(fontsize=8)
+    ax_time.grid(alpha=0.25, which='both')
+
+    fig.tight_layout()
+    fig.savefig(_fig_path(output_dir, 'scalability'), dpi=200)
     plt.close(fig)
 
 
 def analyze(args):
+    global FIG_FORMAT
+    FIG_FORMAT = args.format
     os.makedirs(args.output_dir, exist_ok=True)
-    frames = load_logs(args.log_dir, args.instance_id, args.variant, args.algorithm)
+
+    scalability_only = bool(args.public25_csv or args.scalability_csv)
+    if scalability_only:
+        plot_scalability(args.public25_csv, args.scalability_csv, args.output_dir)
+
+    frames = (
+        load_logs(args.log_dir, args.instance_id, args.variant, args.algorithm)
+        if os.path.isdir(args.log_dir) else []
+    )
     if not frames:
+        if scalability_only:
+            print(f"[Analyze] No training logs under {args.log_dir}; "
+                  f"scalability figure saved under: {args.output_dir}")
+            return
         raise ValueError(f'No training log CSV files found under {args.log_dir}')
 
     summary_path = os.path.join(args.log_dir, 'summary.csv')
@@ -255,6 +342,12 @@ def build_parser():
     parser.add_argument('--variant', default=None)
     parser.add_argument('--algorithm', default=None)
     parser.add_argument('--max-run-plots', type=int, default=20)
+    parser.add_argument('--format', default='pdf', choices=['pdf', 'png'],
+                        help='Figure file format (pdf feeds the paper directly)')
+    parser.add_argument('--public25-csv', default=None,
+                        help='results/public25_summary.csv for the scalability figure')
+    parser.add_argument('--scalability-csv', default=None,
+                        help='results/scalability_summary.csv for the scalability figure')
     return parser
 
 
