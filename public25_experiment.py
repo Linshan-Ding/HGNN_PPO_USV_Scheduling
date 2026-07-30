@@ -65,6 +65,46 @@ def _parse_seeds(seed_text: str) -> List[int]:
     return [int(item.strip()) for item in seed_text.split(',') if item.strip()]
 
 
+def timed_solution_stats(cfg, instance: dict, checkpoints: List[str],
+                         best_rule_name: str) -> dict:
+    """Timing-fair solution-time measurements for one instance.
+
+    PPO: one warm-up plus one timed deterministic episode per seed checkpoint
+    (CPU, single torch thread; see main.timed_evaluation). Best rule: one
+    warm-up plus one timed run. Reproduces the protocol of paper Sec. 5.1.3.
+    """
+    from env import USVSchedulingEnv
+    from main import timed_evaluation
+    from scheduling_rules import get_all_rules, run_scheduling
+
+    solve_times = []
+    decision_times = []
+    for ckpt in checkpoints:
+        if not ckpt or not os.path.exists(ckpt):
+            continue
+        result = timed_evaluation(cfg, instance, ckpt)
+        if result['success']:
+            solve_times.append(result['solve_time_sec'])
+            decision_times.append(result['time_per_decision_ms'])
+
+    rule = next((r for r in get_all_rules() if r.name == best_rule_name), None)
+    rule_time = float('nan')
+    if rule is not None:
+        if rule.name == 'Random':
+            np.random.seed(0)
+        run_scheduling(USVSchedulingEnv(instance), rule)  # warm-up
+        if rule.name == 'Random':
+            np.random.seed(0)
+        rule_time = run_scheduling(USVSchedulingEnv(instance), rule)['solve_time_sec']
+
+    return {
+        'best_rule_solve_time_sec': rule_time,
+        'ppo_solve_time_mean_sec': float(np.mean(solve_times)) if solve_times else float('nan'),
+        'ppo_solve_time_std_sec': float(np.std(solve_times)) if solve_times else float('nan'),
+        'ppo_time_per_decision_ms': float(np.mean(decision_times)) if decision_times else float('nan'),
+    }
+
+
 def run_public25(args) -> List[dict]:
     from main import train
 
@@ -84,6 +124,9 @@ def run_public25(args) -> List[dict]:
         seed_makespans = []
         best_rule_name = None
         best_rule_makespan = None
+        seed_checkpoints = []
+        instance = None
+        last_cfg = None
 
         print("=" * 80)
         print(f"[Public25] Instance {instance_id}: USVs={n_usvs}, Tasks={n_tasks}")
@@ -124,10 +167,15 @@ def run_public25(args) -> List[dict]:
                 update_shuffle=not args.no_update_shuffle,
             )
 
-            _, _, train_info = train(cfg)
+            _, instance, train_info = train(cfg)
             seed_makespans.append(train_info['best_eval_makespan'])
             best_rule_name = train_info['baseline']['best_rule_name']
             best_rule_makespan = train_info['baseline']['best_rule_makespan']
+            seed_checkpoints.append(train_info['best_model_path'])
+            last_cfg = cfg
+
+        timing = timed_solution_stats(
+            last_cfg, instance, seed_checkpoints, best_rule_name)
 
         ppo_mean = float(np.mean(seed_makespans))
         ppo_std = float(np.std(seed_makespans))
@@ -144,6 +192,10 @@ def run_public25(args) -> List[dict]:
             'ppo_std': ppo_std,
             'gap_percent': gap_percent,
             'pass_instance': pass_instance,
+            'best_rule_solve_time_sec': timing['best_rule_solve_time_sec'],
+            'ppo_solve_time_mean_sec': timing['ppo_solve_time_mean_sec'],
+            'ppo_solve_time_std_sec': timing['ppo_solve_time_std_sec'],
+            'ppo_time_per_decision_ms': timing['ppo_time_per_decision_ms'],
         })
 
     ppo_values = [row['ppo_mean'] for row in summary_rows]
@@ -157,7 +209,9 @@ def run_public25(args) -> List[dict]:
     fieldnames = [
         'instance_id', 'n_usvs', 'n_tasks', 'best_rule_name',
         'best_rule_makespan', 'ppo_mean', 'ppo_std',
-        'gap_percent', 'pass_instance'
+        'gap_percent', 'pass_instance',
+        'best_rule_solve_time_sec', 'ppo_solve_time_mean_sec',
+        'ppo_solve_time_std_sec', 'ppo_time_per_decision_ms'
     ]
     with open(summary_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)

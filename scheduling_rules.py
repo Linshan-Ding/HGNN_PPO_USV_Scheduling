@@ -15,6 +15,7 @@ cannot execute any remaining task.
 """
 
 import os
+import time
 import numpy as np
 from typing import List, Tuple, Optional
 
@@ -256,12 +257,13 @@ def run_scheduling(env: USVSchedulingEnv, rule: SchedulingRule,
     Returns:
         Dict with makespan, steps, and success status
     """
+    solve_start = time.perf_counter()
     state = env.reset()
     done = False
     step = 0
     max_steps = env.n_tasks * 10
     info = {}
-    
+
     while not done and step < max_steps:
         task_id, usv_id = rule.select_action(env)
         
@@ -280,10 +282,12 @@ def run_scheduling(env: USVSchedulingEnv, rule: SchedulingRule,
         
         state, reward, done, info = env.step(task_id, usv_id)
     
+    solve_time = time.perf_counter() - solve_start
     success = env.n_scheduled_tasks == env.n_tasks
     makespan = info.get('makespan', float('inf')) if success else float('inf')
-    
-    return {'makespan': makespan, 'steps': step, 'success': success}
+
+    return {'makespan': makespan, 'steps': step, 'success': success,
+            'solve_time_sec': solve_time}
 
 
 def evaluate_rules(instance: dict, rules: List[SchedulingRule],

@@ -19,6 +19,7 @@ EXPECTED_RESULT_FIELDS = {
     "success",
     "runtime_sec",
     "seed",
+    "solve_time_sec",
 }
 
 
