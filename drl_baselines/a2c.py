@@ -162,6 +162,17 @@ class A2CBaseline(DRLBaseline):
             "entropy": float(entropies.mean().item()),
         }
 
+    def train_epoch(self, instance: dict, cfg, epoch: int) -> dict:
+        """One A2C epoch: sample trajectories serially, then one update."""
+        n_trajectories = get_cfg_attr(cfg, "train", "n_trajectories", 8)
+        trajectories = [self._sample_trajectory(instance) for _ in range(n_trajectories)]
+        loss_info = self._update(trajectories)
+        return {
+            "train_makespans": [t["makespan"] for t in trajectories if t["success"]],
+            "steps_collected": sum(len(t["rewards"]) for t in trajectories),
+            "loss_info": loss_info,
+        }
+
     def train(self, instance: dict, cfg=None):
         """Train A2C on one public instance."""
         set_seed(self.seed)
@@ -189,9 +200,9 @@ class A2CBaseline(DRLBaseline):
             )
 
         for epoch in range(1, max_epochs + 1):
-            trajectories = [self._sample_trajectory(instance) for _ in range(n_trajectories)]
-            loss_info = self._update(trajectories)
-            train_makespans = [t["makespan"] for t in trajectories if t["success"]]
+            epoch_info = self.train_epoch(instance, cfg, epoch)
+            loss_info = epoch_info["loss_info"]
+            train_makespans = epoch_info["train_makespans"]
             train_makespan = float(np.mean(train_makespans)) if train_makespans else None
             success_rate = len(train_makespans) / max(n_trajectories, 1)
             eval_makespan = None

@@ -68,6 +68,14 @@ TRAINING_LOG_FIELDS = [
     'effective_update_batch_size',
     'effective_update_micro_batch_size',
     'pairs_per_state',
+    'protocol',                      # 'single' | 'round_robin'
+    'visit_index',                   # 1-based visit count of this row's instance
+    'steps_collected',               # env decisions across this epoch's rollouts
+    'rollout_time_per_decision_ms',  # rollout_time_sec / steps_collected * 1000
+    'eval_steps',                    # decision count of the deterministic eval episode
+    'eval_solve_time_sec',           # wall time of that eval episode
+    'eval_time_per_decision_ms',     # eval_solve_time_sec / eval_steps * 1000
+    'exploration_epsilon',           # DQN/DDQN only; blank otherwise
 ]
 
 

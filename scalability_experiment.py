@@ -21,7 +21,7 @@ from typing import List
 import numpy as np
 
 from config import get_config
-from public25_experiment import _parse_seeds, wilcoxon_signed_rank_less
+from stats_utils import parse_seeds, wilcoxon_signed_rank_less
 
 # Unseen evaluation scales: fleet-size-only control (u12_t100) plus the
 # {10,12,15} x {150,200} grid beyond the largest training scale.
@@ -31,12 +31,17 @@ SCALABILITY_GRID = [
     (10, 200), (12, 200), (15, 200),
 ]
 
+DRL_BASELINES = ['A2C', 'DQN', 'DDQN', 'REINFORCE']
+
 SUMMARY_FIELDS = [
     'instance_id', 'n_usvs', 'n_tasks', 'source_instance',
     'best_rule_name', 'best_rule_makespan', 'best_rule_solve_time_sec',
-    'ppo_zero_shot_mean', 'ppo_zero_shot_std', 'gap_percent',
-    'ppo_solve_time_mean_sec', 'ppo_solve_time_std_sec',
-    'ppo_time_per_decision_ms', 'success_rate',
+    'ppo_zero_shot_makespan', 'ppo_gap_percent',
+    'ppo_solve_time_sec', 'ppo_time_per_decision_ms',
+    'a2c_zero_shot_makespan', 'a2c_gap_percent', 'a2c_solve_time_sec',
+    'dqn_zero_shot_makespan', 'dqn_gap_percent', 'dqn_solve_time_sec',
+    'ddqn_zero_shot_makespan', 'ddqn_gap_percent', 'ddqn_solve_time_sec',
+    'reinforce_zero_shot_makespan', 'reinforce_gap_percent', 'reinforce_solve_time_sec',
 ]
 
 
@@ -111,54 +116,90 @@ def evaluate_rules_timed(instance: dict) -> dict:
     }
 
 
-def evaluate_zero_shot(args, instance: dict, seeds: List[int]) -> dict:
-    """Timed zero-shot evaluation of the source-instance checkpoints."""
-    import torch
-    from main import build_agent, evaluate_agent_once, timed_evaluation
-
-    cfg = get_config(
+def _make_eval_cfg(args, instance: dict):
+    return get_config(
         n_usvs=instance['n_usvs'],
         n_tasks=instance['n_tasks'],
+        model_dir=args.model_dir,
         hidden_dim=args.hidden_dim,
         hgnn_layers=args.hgnn_layers,
         n_heads=args.n_heads,
     )
 
-    makespans, solve_times, decision_times, successes = [], [], [], []
-    for seed in seeds:
-        ckpt = os.path.join(
-            args.model_dir, f'best_{args.source_instance}_seed{seed}.pth')
-        if args.smoke:
-            torch.set_num_threads(1)
-            agent = build_agent(cfg, instance, device='cpu')
-            evaluate_agent_once(agent, instance)  # warm-up
-            result = evaluate_agent_once(agent, instance)
-        elif os.path.exists(ckpt):
-            result = timed_evaluation(cfg, instance, ckpt)
-        else:
-            print(f"  [Skip] missing checkpoint: {ckpt}")
-            continue
 
-        successes.append(result['success'])
-        if result['success']:
-            makespans.append(result['makespan'])
-            solve_times.append(result['solve_time_sec'])
-            decision_times.append(result['time_per_decision_ms'])
+def evaluate_ppo_zero_shot(args, instance: dict, seed: int,
+                           best_rule_makespan: float) -> dict:
+    """Timed zero-shot evaluation of the proposed method's checkpoint."""
+    import torch
+    from main import build_agent, evaluate_agent_once, timed_evaluation
 
+    cfg = _make_eval_cfg(args, instance)
+    ckpt = os.path.join(
+        args.model_dir, f'best_{args.source_instance}_seed{seed}.pth')
+
+    if args.smoke:
+        torch.set_num_threads(1)
+        agent = build_agent(cfg, instance, device='cpu')
+        evaluate_agent_once(agent, instance)  # warm-up
+        result = evaluate_agent_once(agent, instance)
+    elif os.path.exists(ckpt):
+        result = timed_evaluation(cfg, instance, ckpt)
+    else:
+        print(f"  [Skip] missing checkpoint: {ckpt}")
+        return {'ppo_zero_shot_makespan': float('nan'),
+                'ppo_gap_percent': float('nan'),
+                'ppo_solve_time_sec': float('nan'),
+                'ppo_time_per_decision_ms': float('nan')}
+
+    makespan = result['makespan'] if result['success'] else float('nan')
+    gap = (makespan - best_rule_makespan) / best_rule_makespan * 100.0 \
+        if np.isfinite(makespan) and best_rule_makespan > 0 else float('nan')
     return {
-        'ppo_zero_shot_mean': float(np.mean(makespans)) if makespans else float('nan'),
-        'ppo_zero_shot_std': float(np.std(makespans)) if makespans else float('nan'),
-        'ppo_solve_time_mean_sec': float(np.mean(solve_times)) if solve_times else float('nan'),
-        'ppo_solve_time_std_sec': float(np.std(solve_times)) if solve_times else float('nan'),
-        'ppo_time_per_decision_ms': float(np.mean(decision_times)) if decision_times else float('nan'),
-        'success_rate': float(np.mean(successes)) if successes else 0.0,
+        'ppo_zero_shot_makespan': makespan,
+        'ppo_gap_percent': gap,
+        'ppo_solve_time_sec': result['solve_time_sec'],
+        'ppo_time_per_decision_ms': result['time_per_decision_ms'],
     }
 
 
+def evaluate_baselines_zero_shot(args, instance: dict, seed: int,
+                                 best_rule_makespan: float) -> dict:
+    """Timed zero-shot evaluation of every DRL baseline's checkpoint."""
+    from drl_baselines.common import (build_baseline_for_eval,
+                                      evaluate_pairwise_policy_timed,
+                                      timed_baseline_evaluation)
+
+    cfg = _make_eval_cfg(args, instance)
+    stats = {}
+    for alg in DRL_BASELINES:
+        key = alg.lower()
+        ckpt = os.path.join(
+            args.model_dir, f'best_{alg}_{args.source_instance}_seed{seed}.pth')
+        if args.smoke:
+            algorithm = build_baseline_for_eval(alg, cfg, instance)
+            evaluate_pairwise_policy_timed(algorithm, instance)  # warm-up
+            result = evaluate_pairwise_policy_timed(algorithm, instance)
+        elif os.path.exists(ckpt):
+            result = timed_baseline_evaluation(alg, cfg, instance, ckpt)
+        else:
+            print(f"  [Skip] missing checkpoint: {ckpt}")
+            stats[f'{key}_zero_shot_makespan'] = float('nan')
+            stats[f'{key}_gap_percent'] = float('nan')
+            stats[f'{key}_solve_time_sec'] = float('nan')
+            continue
+
+        makespan = result['makespan'] if result['success'] else float('nan')
+        gap = (makespan - best_rule_makespan) / best_rule_makespan * 100.0 \
+            if np.isfinite(makespan) and best_rule_makespan > 0 else float('nan')
+        stats[f'{key}_zero_shot_makespan'] = makespan
+        stats[f'{key}_gap_percent'] = gap
+        stats[f'{key}_solve_time_sec'] = result['solve_time_sec']
+    return stats
+
+
 def run_scalability(args) -> List[dict]:
-    seeds = _parse_seeds(args.seeds)
-    if args.smoke:
-        seeds = seeds[:1]
+    seeds = parse_seeds(args.seeds)
+    seed = seeds[0]
     os.makedirs(args.result_dir, exist_ok=True)
 
     instances = generate_scalability_instances(args.data_dir, args.seed_start)
@@ -171,27 +212,25 @@ def run_scalability(args) -> List[dict]:
               f"Tasks={instance['n_tasks']} (zero-shot from {args.source_instance})")
 
         rule_stats = evaluate_rules_timed(instance)
-        ppo_stats = evaluate_zero_shot(args, instance, seeds)
-
         best_rule_makespan = rule_stats['best_rule_makespan']
-        ppo_mean = ppo_stats['ppo_zero_shot_mean']
-        gap_percent = (
-            (ppo_mean - best_rule_makespan) / best_rule_makespan * 100.0
-            if np.isfinite(ppo_mean) and best_rule_makespan > 0 else float('nan')
-        )
+
+        ppo_stats = evaluate_ppo_zero_shot(args, instance, seed, best_rule_makespan)
+        drl_stats = evaluate_baselines_zero_shot(args, instance, seed,
+                                                 best_rule_makespan)
 
         summary_rows.append({
             'instance_id': instance_id,
             'n_usvs': instance['n_usvs'],
             'n_tasks': instance['n_tasks'],
             'source_instance': args.source_instance,
-            'gap_percent': gap_percent,
             **rule_stats,
             **ppo_stats,
+            **drl_stats,
         })
         print(f"  Best rule: {rule_stats['best_rule_name']} "
-              f"({best_rule_makespan:.1f}), PPO zero-shot: {ppo_mean:.1f}, "
-              f"gap: {gap_percent:+.2f}%")
+              f"({best_rule_makespan:.1f}), PPO zero-shot: "
+              f"{ppo_stats['ppo_zero_shot_makespan']:.1f}, "
+              f"gap: {ppo_stats['ppo_gap_percent']:+.2f}%")
 
     summary_path = os.path.join(args.result_dir, 'scalability_summary.csv')
     with open(summary_path, 'w', newline='', encoding='utf-8-sig') as f:
@@ -200,9 +239,9 @@ def run_scalability(args) -> List[dict]:
         writer.writerows(summary_rows)
 
     paired = [
-        (row['ppo_zero_shot_mean'], row['best_rule_makespan'])
+        (row['ppo_zero_shot_makespan'], row['best_rule_makespan'])
         for row in summary_rows
-        if np.isfinite(row['ppo_zero_shot_mean'])
+        if np.isfinite(row['ppo_zero_shot_makespan'])
     ]
     if paired:
         ppo_values, rule_values = zip(*paired)
@@ -228,7 +267,7 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-instance', default='u10_t100',
                         help='Training instance whose checkpoints are evaluated zero-shot')
-    parser.add_argument('--seeds', default='0,1,2,3,4')
+    parser.add_argument('--seeds', default='0')
     parser.add_argument('--model-dir', default='models')
     parser.add_argument('--data-dir', default=os.path.join('data', 'scalability'))
     parser.add_argument('--result-dir', default='results')
