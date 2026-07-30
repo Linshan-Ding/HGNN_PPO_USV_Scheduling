@@ -85,6 +85,16 @@ class DQNBaseline(DRLBaseline):
             eps=1e-5,
         )
         self.replay = ReplayBuffer(self.replay_size)
+        self.replays = {}
+        self.rr_replay_size = get_cfg_attr(cfg, "train", "drl_rr_replay_size", 2000)
+
+    def set_instance(self, instance: dict):
+        """Switch mask bounds AND the replay pool to this instance's own buffer."""
+        super().set_instance(instance)
+        instance_id = str(instance.get("instance_id", "unknown"))
+        if instance_id not in self.replays:
+            self.replays[instance_id] = ReplayBuffer(self.rr_replay_size)
+        self.replay = self.replays[instance_id]
 
     def _sync_target(self):
         self.target_encoder.load_state_dict(self.online_encoder.state_dict())
@@ -156,7 +166,7 @@ class DQNBaseline(DRLBaseline):
             makespan = info.get("makespan", makespan)
 
         success = env.n_scheduled_tasks == env.n_tasks
-        return makespan if success else float("inf"), success
+        return makespan if success else float("inf"), success, step
 
     def _transition_target(self, transition):
         torch = self.torch
@@ -219,6 +229,34 @@ class DQNBaseline(DRLBaseline):
         self.optimizer.step()
         return float(loss.item())
 
+    def train_epoch(self, instance: dict, cfg, epoch: int) -> dict:
+        """One DQN epoch: collect trajectories, replay updates, target sync."""
+        n_trajectories = get_cfg_attr(cfg, "train", "n_trajectories", 8)
+        train_makespans = []
+        steps_collected = 0
+        for _ in range(n_trajectories):
+            makespan, success, steps = self._collect_trajectory(instance, epoch)
+            steps_collected += steps
+            if success:
+                train_makespans.append(makespan)
+
+        batch_losses = []
+        for _ in range(self.updates_per_epoch):
+            if len(self.replay) >= 1:
+                batch_losses.append(self._update_batch())
+
+        if epoch % self.target_update_interval == 0:
+            self._sync_target()
+
+        return {
+            "train_makespans": train_makespans,
+            "steps_collected": steps_collected,
+            "loss_info": {
+                "q_loss": float(np.mean(batch_losses)) if batch_losses else None,
+            },
+            "exploration_epsilon": self._epsilon(epoch),
+        }
+
     def train(self, instance: dict, cfg=None):
         """Train DQN on one public instance."""
         set_seed(self.seed)
@@ -248,19 +286,10 @@ class DQNBaseline(DRLBaseline):
             )
 
         for epoch in range(1, max_epochs + 1):
-            train_makespans = []
-            for _ in range(n_trajectories):
-                makespan, success = self._collect_trajectory(instance, epoch)
-                if success:
-                    train_makespans.append(makespan)
-
-            batch_losses = []
-            for _ in range(self.updates_per_epoch):
-                if len(self.replay) >= 1:
-                    batch_losses.append(self._update_batch())
-
-            if epoch % self.target_update_interval == 0:
-                self._sync_target()
+            epoch_info = self.train_epoch(instance, cfg, epoch)
+            train_makespans = epoch_info["train_makespans"]
+            batch_losses = ([epoch_info["loss_info"]["q_loss"]]
+                            if epoch_info["loss_info"]["q_loss"] is not None else [])
 
             eval_makespan = None
             if epoch == 1 or epoch % eval_interval == 0:

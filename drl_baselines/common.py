@@ -63,26 +63,30 @@ class DRLVisdomLogger:
         except Exception as exc:
             print(f"[Visdom:{algorithm_name}] Not available: {exc}")
 
-    def plot(self, name: str, x: int, y):
-        """Plot one scalar if Visdom is enabled."""
+    def plot(self, name: str, x: int, y, trace: str = None):
+        """Plot one scalar if Visdom is enabled; `trace` names a line in the window."""
         if not self.enabled or y is None:
             return
         y_arr = np.array([float(y)])
         x_arr = np.array([int(x)])
         if name not in self.wins:
-            self.wins[name] = self.viz.line(
-                X=x_arr,
-                Y=y_arr,
-                opts=dict(title=name, xlabel="Epoch", ylabel=name),
-            )
+            opts = dict(title=name, xlabel="Epoch", ylabel=name)
+            if trace is not None:
+                opts["showlegend"] = True
+                self.wins[name] = self.viz.line(X=x_arr, Y=y_arr, name=trace, opts=opts)
+            else:
+                self.wins[name] = self.viz.line(X=x_arr, Y=y_arr, opts=opts)
+        elif trace is not None:
+            self.viz.line(X=x_arr, Y=y_arr, win=self.wins[name],
+                          name=trace, update="append")
         else:
             self.viz.line(X=x_arr, Y=y_arr, win=self.wins[name], update="append")
 
-    def log_metrics(self, epoch: int, metrics: Dict[str, object]):
+    def log_metrics(self, epoch: int, metrics: Dict[str, object], trace: str = None):
         """Plot all numeric scalar metrics."""
         for name, value in metrics.items():
             if value is not None:
-                self.plot(name, epoch, value)
+                self.plot(name, epoch, value, trace=trace)
 
     def text(self, name: str, content: str):
         """Show a text panel if Visdom is enabled."""
@@ -247,6 +251,12 @@ def checkpoint_path(cfg, algorithm_name: str, instance: dict, seed: int) -> str:
 
 def evaluate_pairwise_policy(agent, instance: dict) -> Tuple[float, bool]:
     """Deterministically evaluate any agent exposing select_action(...)."""
+    result = evaluate_pairwise_policy_timed(agent, instance)
+    return result["makespan"], result["success"]
+
+
+def evaluate_pairwise_policy_timed(agent, instance: dict) -> Dict[str, object]:
+    """Timed deterministic evaluation returning step count and wall time."""
     from env import USVSchedulingEnv
 
     module_names = [
@@ -266,6 +276,7 @@ def evaluate_pairwise_policy(agent, instance: dict) -> Tuple[float, bool]:
             modules.append((module, module.training))
             module.eval()
 
+    solve_start = time.perf_counter()
     env = USVSchedulingEnv(instance)
     state = env.reset()
     done = False
@@ -280,12 +291,52 @@ def evaluate_pairwise_policy(agent, instance: dict) -> Tuple[float, bool]:
         action = agent.select_action(env, state, deterministic=True)
         state, _, done, info = env.step(action[0], action[1])
         step += 1
+    solve_time = time.perf_counter() - solve_start
 
     success = env.n_scheduled_tasks == env.n_tasks
     makespan = info.get("makespan", float("inf")) if success else float("inf")
     for module, was_training in modules:
         module.train(was_training)
-    return makespan, success
+    return {
+        "makespan": makespan,
+        "success": success,
+        "steps": step,
+        "solve_time_sec": solve_time,
+        "time_per_decision_ms": solve_time / max(step, 1) * 1000.0,
+    }
+
+
+def build_baseline_for_eval(algorithm_name: str, cfg, instance: dict,
+                            checkpoint: str = None, device: str = "cpu"):
+    """Build a baseline sized for `instance` and optionally load a checkpoint."""
+    import torch
+
+    from .registry import get_algorithm
+
+    torch.set_num_threads(1)
+    algorithm = get_algorithm(algorithm_name, seed=0)
+    algorithm._build(cfg, instance["n_usvs"], instance["n_tasks"])
+    algorithm.device = torch.device(device)
+    for name in ("actor_encoder", "actor", "critic_encoder", "critic",
+                 "online_encoder", "online_head", "target_encoder", "target_head"):
+        module = getattr(algorithm, name, None)
+        if module is not None and hasattr(module, "to"):
+            module.to(algorithm.device)
+    if checkpoint:
+        algorithm.load(checkpoint)
+    return algorithm
+
+
+def timed_baseline_evaluation(algorithm_name: str, cfg, instance: dict,
+                              checkpoint: str = None, warmup: int = 1) -> Dict[str, object]:
+    """Timing-fair zero-shot evaluation of a DRL baseline checkpoint.
+
+    Mirrors main.timed_evaluation: CPU, single torch thread, untimed warm-up.
+    """
+    algorithm = build_baseline_for_eval(algorithm_name, cfg, instance, checkpoint)
+    for _ in range(max(warmup, 0)):
+        evaluate_pairwise_policy_timed(algorithm, instance)
+    return evaluate_pairwise_policy_timed(algorithm, instance)
 
 
 def now() -> float:

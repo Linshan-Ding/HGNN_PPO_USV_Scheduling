@@ -107,6 +107,10 @@ class TrainConfig:
     # Deterministic evaluation/checkpointing
     eval_interval: int = 10
     baseline_seed: int = 20260519
+
+    # DRL baseline round-robin knobs (read via get_cfg_attr in drl_baselines/)
+    drl_epsilon_decay_epochs: int = 200
+    drl_rr_replay_size: int = 2000
     train_seeds: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
 
     # Logging
