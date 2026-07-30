@@ -56,33 +56,39 @@ class VisdomLogger:
         except Exception as exc:
             print(f"[Visdom] Not available: {exc}")
     
-    def plot(self, name: str, x: int, y: float):
-        """Plot a single point."""
+    def plot(self, name: str, x: int, y: float, trace: str = None):
+        """Plot a single point; `trace` adds a named line inside the window."""
         if not self.enabled:
             return
-        
+
         y_arr = np.array([float(y)])
         x_arr = np.array([int(x)])
-        
+
         if name not in self.wins:
-            self.wins[name] = self.viz.line(
-                X=x_arr, Y=y_arr,
-                opts=dict(title=name, xlabel='Epoch', ylabel=name)
-            )
+            opts = dict(title=name, xlabel='Epoch', ylabel=name)
+            if trace is not None:
+                opts['showlegend'] = True
+                self.wins[name] = self.viz.line(
+                    X=x_arr, Y=y_arr, name=trace, opts=opts)
+            else:
+                self.wins[name] = self.viz.line(X=x_arr, Y=y_arr, opts=opts)
+        elif trace is not None:
+            self.viz.line(X=x_arr, Y=y_arr, win=self.wins[name],
+                          name=trace, update='append')
         else:
             self.viz.line(X=x_arr, Y=y_arr, win=self.wins[name], update='append')
-    
+
     def text(self, name: str, content: str):
         """Show a text panel in Visdom."""
         if not self.enabled:
             return
         self.wins[name] = self.viz.text(content, win=self.wins.get(name))
-    
-    def log_metrics(self, epoch: int, metrics: dict):
+
+    def log_metrics(self, epoch: int, metrics: dict, trace: str = None):
         """Plot a dictionary of scalar metrics."""
         for name, value in metrics.items():
             if value is not None:
-                self.plot(name, epoch, value)
+                self.plot(name, epoch, value, trace=trace)
 
 
 def set_global_seed(seed: int):
@@ -197,6 +203,16 @@ def build_agent(cfg, instance: dict, device: str = None, verbose: bool = False) 
     """Construct a PPOAgent sized for an instance."""
     return PPOAgent(cfg, instance['n_usvs'], instance['n_tasks'],
                     device=device, verbose=verbose)
+
+
+def default_checkpoint_path(cfg, instance: dict) -> str:
+    """Per-instance best-checkpoint path written by the trainers."""
+    variant = cfg.network.get('ablation_variant', 'full')
+    variant_tag = '' if variant == 'full' else f'_{variant}'
+    seed = cfg.train.get('seed', 0)
+    instance_id = instance.get('instance_id', 'unknown')
+    return os.path.join(
+        cfg.model_dir, f'best_{instance_id}{variant_tag}_seed{seed}.pth')
 
 
 def timed_evaluation(cfg, instance: dict, checkpoint_path: str, warmup: int = 1) -> dict:
@@ -337,7 +353,6 @@ def train(cfg):
         best_eval_makespan = initial_eval['makespan']
         best_eval_epoch = 0
         best_model_path = agent.save(best_model_path)
-        agent.save(os.path.join(cfg.model_dir, 'best_model.pth'))
         initial_gap = (
             (best_eval_makespan - baseline['best_rule_makespan']) /
             baseline['best_rule_makespan'] * 100.0
@@ -368,6 +383,11 @@ def train(cfg):
             'elapsed_sec': time.monotonic() - training_start_time,
             'eval_makespan': initial_eval['makespan'] if initial_eval['success'] else None,
             'eval_success': initial_eval['success'],
+            'protocol': 'single',
+            'visit_index': 0,
+            'eval_steps': initial_eval['steps'],
+            'eval_solve_time_sec': initial_eval['solve_time_sec'],
+            'eval_time_per_decision_ms': initial_eval['time_per_decision_ms'],
             'best_eval_makespan': best_eval_makespan,
             'best_eval_epoch': best_eval_epoch,
             'gap_to_best_rule_percent': initial_gap,
@@ -432,12 +452,18 @@ def train(cfg):
         eval_makespan = None
         eval_success = None
         gap_percent = None
+        eval_steps = None
+        eval_solve_time_sec = None
+        eval_time_per_decision_ms = None
         
         # ============ DETERMINISTIC EVALUATION ============
         if epoch == 1 or epoch % eval_interval == 0:
             eval_result = evaluate_agent_once(agent, fixed_instance)
             eval_makespan = eval_result['makespan']
             eval_success = eval_result['success']
+            eval_steps = eval_result['steps']
+            eval_solve_time_sec = eval_result['solve_time_sec']
+            eval_time_per_decision_ms = eval_result['time_per_decision_ms']
             gap_percent = (
                 (eval_makespan - baseline['best_rule_makespan']) /
                 baseline['best_rule_makespan'] * 100.0
@@ -447,7 +473,6 @@ def train(cfg):
                 best_eval_makespan = eval_makespan
                 best_eval_epoch = epoch
                 best_model_path = agent.save(best_model_path)
-                agent.save(os.path.join(cfg.model_dir, 'best_model.pth'))
         epoch_time_sec = time.monotonic() - epoch_start
         
         # Visdom logging
@@ -541,6 +566,16 @@ def train(cfg):
                 'effective_update_batch_size': loss_info.get('effective_update_batch_size'),
                 'effective_update_micro_batch_size': loss_info.get('effective_update_micro_batch_size'),
                 'pairs_per_state': loss_info.get('pairs_per_state'),
+                'protocol': 'single',
+                'visit_index': epoch,
+                'steps_collected': rollout_info.get('total_steps'),
+                'rollout_time_per_decision_ms': (
+                    rollout_time_sec / rollout_info['total_steps'] * 1000.0
+                    if rollout_info.get('total_steps') else None
+                ),
+                'eval_steps': eval_steps,
+                'eval_solve_time_sec': eval_solve_time_sec,
+                'eval_time_per_decision_ms': eval_time_per_decision_ms,
             })
         
         # Console logging
@@ -585,7 +620,7 @@ def evaluate(cfg, agent=None, instance=None, n_episodes=10):
     
     if agent is None:
         agent = PPOAgent(cfg, instance['n_usvs'], instance['n_tasks'])
-        agent.load(os.path.join(cfg.model_dir, 'best_model.pth'))
+        agent.load(default_checkpoint_path(cfg, instance))
     
     print(f"\n[Evaluation] {n_episodes} episodes (deterministic)")
     
@@ -622,7 +657,7 @@ def demo(cfg, agent=None, instance=None):
     
     if agent is None:
         agent = PPOAgent(cfg, instance['n_usvs'], instance['n_tasks'])
-        agent.load(os.path.join(cfg.model_dir, 'best_model.pth'))
+        agent.load(default_checkpoint_path(cfg, instance))
     
     env = USVSchedulingEnv(instance)
     state = env.reset()
@@ -663,7 +698,7 @@ def compare_with_heuristics(cfg, agent=None, instance=None):
     
     if agent is None:
         agent = PPOAgent(cfg, instance['n_usvs'], instance['n_tasks'])
-        agent.load(os.path.join(cfg.model_dir, 'best_model.pth'))
+        agent.load(default_checkpoint_path(cfg, instance))
     
     print(f"\n[Comparison] PPO vs Heuristics")
     print("-" * 50)

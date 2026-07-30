@@ -180,6 +180,7 @@ def merge_rollout_results(agent: PPOAgent, results: List[Dict]) -> Dict[str, Lis
     return {
         'epoch_rewards': epoch_rewards,
         'epoch_makespans': epoch_makespans,
+        'total_steps': sum(len(result['transitions']) for result in results),
     }
 
 
