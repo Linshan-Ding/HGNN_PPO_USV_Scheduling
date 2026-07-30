@@ -111,7 +111,7 @@ def set_seed(seed: int):
 
 def make_result(algorithm_name: str, category: str, instance: dict,
                 makespan: float, success: bool, runtime_sec: float,
-                seed: int) -> AlgorithmResult:
+                seed: int, solve_time_sec: float = float("nan")) -> AlgorithmResult:
     """Build a unified AlgorithmResult from an instance and metrics."""
     return AlgorithmResult(
         algorithm_name=algorithm_name,
@@ -123,6 +123,7 @@ def make_result(algorithm_name: str, category: str, instance: dict,
         success=bool(success),
         runtime_sec=float(runtime_sec),
         seed=int(seed),
+        solve_time_sec=float(solve_time_sec),
     )
 
 

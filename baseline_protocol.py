@@ -11,7 +11,13 @@ from typing import Dict
 
 @dataclass
 class AlgorithmResult:
-    """Unified result record for DRL and metaheuristic comparison algorithms."""
+    """Unified result record for DRL and metaheuristic comparison algorithms.
+
+    Timing semantics: ``runtime_sec`` is the training wall-clock when the
+    record comes from ``train()``; ``solve_time_sec`` is the wall-clock of one
+    deterministic solution episode (CPU, single torch thread) when the record
+    comes from ``evaluate()``, and NaN otherwise.
+    """
 
     algorithm_name: str
     category: str
@@ -22,6 +28,7 @@ class AlgorithmResult:
     success: bool
     runtime_sec: float
     seed: int
+    solve_time_sec: float = float("nan")
 
     def to_dict(self) -> Dict[str, object]:
         """Convert result to a CSV-friendly dictionary."""

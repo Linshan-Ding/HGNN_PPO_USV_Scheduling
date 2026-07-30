@@ -155,6 +155,7 @@ def evaluate_agent_once(agent: PPOAgent, instance: dict) -> dict:
     agent.critic_encoder.eval()
     agent.critic.eval()
 
+    solve_start = time.perf_counter()
     env = USVSchedulingEnv(instance)
     state = env.reset()
     done = False
@@ -170,6 +171,7 @@ def evaluate_agent_once(agent: PPOAgent, instance: dict) -> dict:
             action, _, _ = agent.select_action(env, state, deterministic=True)
             state, _, done, info = env.step(action[0], action[1])
             step += 1
+    solve_time = time.perf_counter() - solve_start
 
     if modes['actor_encoder']:
         agent.actor_encoder.train()
@@ -182,7 +184,35 @@ def evaluate_agent_once(agent: PPOAgent, instance: dict) -> dict:
 
     success = env.n_scheduled_tasks == env.n_tasks
     makespan = info.get('makespan', float('inf')) if success else float('inf')
-    return {'makespan': makespan, 'success': success, 'steps': step}
+    return {
+        'makespan': makespan,
+        'success': success,
+        'steps': step,
+        'solve_time_sec': solve_time,
+        'time_per_decision_ms': solve_time / max(step, 1) * 1000.0,
+    }
+
+
+def build_agent(cfg, instance: dict, device: str = None, verbose: bool = False) -> PPOAgent:
+    """Construct a PPOAgent sized for an instance."""
+    return PPOAgent(cfg, instance['n_usvs'], instance['n_tasks'],
+                    device=device, verbose=verbose)
+
+
+def timed_evaluation(cfg, instance: dict, checkpoint_path: str, warmup: int = 1) -> dict:
+    """Timing-fair deterministic evaluation of a trained checkpoint.
+
+    Protocol (paper Sec. 5.1.3): CPU inference with a single torch thread,
+    one untimed warm-up episode, then one timed episode. The timer covers the
+    full rollout (graph feature construction and forward passes included);
+    model loading is excluded.
+    """
+    torch.set_num_threads(1)
+    agent = build_agent(cfg, instance, device='cpu', verbose=False)
+    agent.load(checkpoint_path)
+    for _ in range(max(warmup, 0)):
+        evaluate_agent_once(agent, instance)
+    return evaluate_agent_once(agent, instance)
 
 
 def train(cfg):

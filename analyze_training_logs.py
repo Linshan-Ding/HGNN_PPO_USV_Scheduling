@@ -108,6 +108,10 @@ def build_summary(frames: List[pd.DataFrame], summary_path: str) -> pd.DataFrame
             'best_rule_makespan': best_rule,
             'gap_to_best_rule_percent': gap,
             'final_success_rate': last.get('success_rate'),
+            'mean_rollout_time_sec': float(df['rollout_time_sec'].mean()) if 'rollout_time_sec' in df else float('nan'),
+            'mean_update_time_sec': float(df['update_time_sec'].mean()) if 'update_time_sec' in df else float('nan'),
+            'mean_epoch_time_sec': float(df['epoch_time_sec'].mean()) if 'epoch_time_sec' in df else float('nan'),
+            'total_train_time_sec': float(df['elapsed_sec'].dropna().iloc[-1]) if 'elapsed_sec' in df and not df['elapsed_sec'].dropna().empty else float('nan'),
             'training_log_path': df.attrs.get('training_log_path'),
         })
 

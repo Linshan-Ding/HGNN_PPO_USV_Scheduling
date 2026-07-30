@@ -290,9 +290,10 @@ class DQNBaseline(DRLBaseline):
         """Evaluate deterministic DQN policy."""
         start = now()
         makespan, success = evaluate_pairwise_policy(self, instance)
+        elapsed = now() - start
         return make_result(
             self.algorithm_name, self.category, instance,
-            makespan, success, now() - start, self.seed
+            makespan, success, elapsed, self.seed, solve_time_sec=elapsed
         )
 
     def save(self, path: str):
