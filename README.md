@@ -79,14 +79,21 @@ python scalability_experiment.py
 python extract_results.py
 
 # ⑦ 生成论文全部配图（PDF，直接放入论文仓库 figures/generated/）
-python analyze_training_logs.py \
-    --main-results-csv results/main_results.csv \
-    --scalability-csv results/scalability_summary.csv \
-    --decision-time-csv results/decision_time_grid.csv
-
-# 甘特图（可选，论文 fig:gantt）
-python main.py            # demo 模式生成 results/gantt.png（见 main.py 底部入口）
+#    每图一条命令，全部单行、默认路径齐全，Windows cmd/PowerShell 可直接粘贴：
+python analyze_training_logs.py training_curves
+python analyze_training_logs.py convergence_all25
+python analyze_training_logs.py ablation_curves
+python analyze_training_logs.py gap_heatmap
+python analyze_training_logs.py decision_time_heatmap
+python analyze_training_logs.py drl_gap_violin
+python analyze_training_logs.py gap_by_tasks
+python analyze_training_logs.py scalability
+python analyze_training_logs.py gantt --gantt-instance u6_t60
+#    或一次全部生成（gantt 在缺 checkpoint 时自动跳过）：
+python analyze_training_logs.py all
 ```
+
+各命令的输入默认值：曲线/小提琴/箱线类读 `results/training_logs/`；`gap_heatmap` 读 `results/main_results.csv`；`decision_time_heatmap` 读 `results/decision_time_grid.csv`；`scalability` 读 `results/main_results.csv` + `results/scalability_summary.csv`；`gantt` 读 `data/public/` 实例与 `models/best_{instance}_seed0.pth`（网络规模参数需与训练一致：`--hidden-dim 256 --hgnn-layers 3 --n-heads 4`，即默认值）。输出统一为 `results/figures/*.pdf`（`--format png` 可出预览图）。
 
 训练期间 Visdom 展示 **25 条逐算例训练曲线**（`Eval Makespan by Instance` 与 `Gap vs Best Rule (%) by Instance` 两个多曲线窗口，每算例每 25 个周期新增一个数据点），以及损失/熵/耗时等汇总曲线。
 
@@ -119,7 +126,7 @@ python main.py            # demo 模式生成 results/gantt.png（见 main.py �
 | `results/wilcoxon_results.csv` | extract_results | **tab:wilcoxon**（8 组对比） |
 | `results/scalability_summary.csv` | scalability_experiment | **tab:scalability / tab:scalability_time** |
 | `results/scalability_wilcoxon.txt` | scalability_experiment | 5.7 行文内检验值 |
-| `results/figures/*.pdf`（8 张） | analyze_training_logs | 论文全部实验配图 |
+| `results/figures/*.pdf`（9 张，含 gantt\_comparison） | analyze_training_logs | 论文全部实验配图 |
 
 训练日志 CSV 关键列：`instance_id`（当期算例）、`visit_index`（第几次访问）、`epoch_time_sec`（周期耗时）、`steps_collected`（rollout 决策数）、`eval_steps / eval_solve_time_sec / eval_time_per_decision_ms`（评估决策数/求解耗时/逐决策延迟）、`gap_to_best_rule_percent`、`exploration_epsilon`（DQN/DDQN）。
 
