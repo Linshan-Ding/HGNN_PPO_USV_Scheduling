@@ -143,9 +143,15 @@ def _safe_name(text: object) -> str:
 # Data loading
 # --------------------------------------------------------------------------
 
-def load_logs(log_dir: str, algorithm: str = None,
-              variant: str = None) -> List[pd.DataFrame]:
-    """Load per-run DataFrames; a run is labeled by (algorithm, variant)."""
+def load_logs(log_dir: str, algorithm: str = None, variant: str = None,
+              protocol: str = 'round_robin') -> List[pd.DataFrame]:
+    """Load per-run DataFrames; a run is labeled by (algorithm, variant).
+
+    Only rows matching `protocol` are kept (default: round_robin, the paper
+    protocol). Logs written before the round-robin upgrade have no `protocol`
+    column and are skipped entirely, so stale single-instance runs in the same
+    directory can never leak into the figures.
+    """
     frames = []
     if not os.path.isdir(log_dir):
         return frames
@@ -156,6 +162,13 @@ def load_logs(log_dir: str, algorithm: str = None,
         df = pd.read_csv(path, encoding='utf-8-sig')
         if df.empty or 'run_id' not in df.columns:
             continue
+        if protocol:
+            if 'protocol' not in df.columns:
+                continue
+            df = df[df['protocol'] == protocol]
+            if df.empty:
+                continue
+            df = df.reset_index(drop=True)
         for col in NUMERIC_COLUMNS:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -169,15 +182,22 @@ def load_logs(log_dir: str, algorithm: str = None,
     return frames
 
 
+def _run_timestamp(df: pd.DataFrame) -> str:
+    """Trailing YYYYMMDD_HHMMSS of the run_id (falls back to the whole id)."""
+    run_id = str(df.iloc[0].get('run_id'))
+    match = re.search(r'(\d{8}_\d{6})$', run_id)
+    return match.group(1) if match else run_id
+
+
 def latest_run(frames: List[pd.DataFrame], algorithm: str,
                variant: str) -> Optional[pd.DataFrame]:
-    """Most recent run for (algorithm, variant); run_ids embed timestamps."""
+    """Most recent run for (algorithm, variant), by run-id timestamp."""
     candidates = [df for df in frames
                   if str(df.iloc[0].get('algorithm')) == algorithm
                   and str(df.iloc[0].get('variant')) == variant]
     if not candidates:
         return None
-    return max(candidates, key=lambda df: str(df.iloc[0].get('run_id')))
+    return max(candidates, key=_run_timestamp)
 
 
 def build_summary(frames: List[pd.DataFrame], summary_path: str) -> pd.DataFrame:
@@ -235,6 +255,10 @@ def _require_run(args, algorithm='PPO', variant='full') -> pd.DataFrame:
         raise SystemExit(
             f'No round-robin training log for ({algorithm}, {variant}) '
             f'under {args.log_dir}')
+    if 'visit_index' not in run.columns or run['visit_index'].isna().all():
+        raise SystemExit(
+            f'Selected log {run.attrs.get("training_log_path")} has no '
+            f'visit_index data -- it is not a round-robin training log')
     return run
 
 

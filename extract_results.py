@@ -62,9 +62,14 @@ def load_round_robin_logs(log_dir: str) -> pd.DataFrame:
         if col in merged.columns:
             merged[col] = pd.to_numeric(merged[col], errors='coerce')
 
-    # Keep only the most recent run_id per (algorithm, variant)
-    latest = merged.groupby(['algorithm', 'variant'])['run_id'].transform('max')
-    return merged[merged['run_id'] == latest].copy()
+    # Keep only the most recent run per (algorithm, variant), ranked by the
+    # trailing run-id timestamp (lexicographic run_id would rank the embedded
+    # instance/seed text above the date).
+    ts = merged['run_id'].astype(str).str.extract(r'(\d{8}_\d{6})$', expand=False)
+    merged['_run_ts'] = ts.fillna(merged['run_id'].astype(str))
+    latest = merged.groupby(['algorithm', 'variant'])['_run_ts'].transform('max')
+    return (merged[merged['_run_ts'] == latest]
+            .drop(columns=['_run_ts']).copy())
 
 
 def method_run(logs: pd.DataFrame, algorithm: str,
