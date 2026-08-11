@@ -570,6 +570,86 @@ def plot_gap_by_tasks(run: pd.DataFrame, output_dir: str):
     _save(fig, output_dir, 'gap_by_tasks')
 
 
+def plot_scalability(main_results_csv: str, scalability_csv: str,
+                     output_dir: str):
+    """(a) per-method gap% vs M (zero-shot shaded); (b) log solve time vs M."""
+    train_df = (pd.read_csv(main_results_csv, encoding='utf-8-sig')
+                if main_results_csv and os.path.exists(main_results_csv)
+                else None)
+    scal = (pd.read_csv(scalability_csv, encoding='utf-8-sig')
+            if scalability_csv and os.path.exists(scalability_csv) else None)
+    if train_df is None and scal is None:
+        raise SystemExit('Neither main_results.csv nor scalability_summary.csv found')
+
+    fig, (ax_gap, ax_time) = plt.subplots(1, 2, figsize=(6.8, 2.9))
+
+    train_max_tasks = train_df['n_tasks'].max() if train_df is not None else None
+    zero_shot_max = scal['n_tasks'].max() if scal is not None else None
+
+    for ax in (ax_gap, ax_time):
+        if train_max_tasks is not None and zero_shot_max is not None:
+            ax.axvspan(train_max_tasks, zero_shot_max, color='#E69F00',
+                       alpha=0.07, lw=0)
+
+    # (a) gap vs M per method (mean over fleet sizes)
+    ax_gap.axhline(0, color=ZERO_LINE_COLOR, linestyle='--', linewidth=0.8)
+    if train_df is not None:
+        series = train_df.groupby('n_tasks')['gap_percent'].mean()
+        ax_gap.plot(series.index, series.values,
+                    color=METHOD_COLORS['Ours'], marker=METHOD_MARKERS['Ours'],
+                    markersize=3.5, linewidth=1.3, label='Ours')
+    if scal is not None:
+        gap_cols = [('ppo_gap_percent', 'Ours'), ('a2c_gap_percent', 'A2C'),
+                    ('dqn_gap_percent', 'DQN'), ('ddqn_gap_percent', 'DDQN'),
+                    ('reinforce_gap_percent', 'REINFORCE')]
+        for col, label in gap_cols:
+            if col not in scal:
+                continue
+            series = scal.groupby('n_tasks')[col].mean().dropna()
+            if series.empty:
+                continue
+            ax_gap.plot(series.index, series.values,
+                        color=METHOD_COLORS[label],
+                        marker=METHOD_MARKERS[label], markersize=3.5,
+                        linewidth=1.1, linestyle='--' if label == 'Ours' else '-',
+                        label=f'{label} (zero-shot)' if label == 'Ours' else label)
+    ax_gap.set_xlabel('Number of tasks $M$')
+    ax_gap.set_ylabel('Gap to best rule (%)')
+    ax_gap.set_title('(a) Solution quality across scales', fontsize=8.5)
+    ax_gap.legend(ncol=2, columnspacing=0.8, handlelength=1.6)
+    ax_gap.grid(True, axis='y')
+
+    # (b) solve time vs M, log axis
+    if scal is not None:
+        time_cols = [('best_rule_solve_time_sec', 'Best rule'),
+                     ('ppo_solve_time_sec', 'Ours'),
+                     ('a2c_solve_time_sec', 'A2C'),
+                     ('dqn_solve_time_sec', 'DQN'),
+                     ('ddqn_solve_time_sec', 'DDQN'),
+                     ('reinforce_solve_time_sec', 'REINFORCE')]
+        for col, label in time_cols:
+            if col not in scal:
+                continue
+            series = scal.groupby('n_tasks')[col].mean().dropna()
+            if series.empty:
+                continue
+            ax_time.plot(series.index, series.values,
+                         color=METHOD_COLORS[label],
+                         marker=METHOD_MARKERS[label], markersize=3.5,
+                         linewidth=1.1,
+                         linestyle='--' if label == 'Best rule' else '-',
+                         label=label)
+        ax_time.set_yscale('log')
+    ax_time.set_xlabel('Number of tasks $M$')
+    ax_time.set_ylabel('Solution time (s)')
+    ax_time.set_title('(b) Zero-shot solution time', fontsize=8.5)
+    ax_time.legend(ncol=2, columnspacing=0.8, handlelength=1.6)
+    ax_time.grid(True, which='both', axis='y')
+
+    fig.tight_layout()
+    _save(fig, output_dir, 'scalability')
+
+
 def plot_improvement_dumbbell(main_results_csv: str, output_dir: str):
     """Horizontal dumbbell chart: per-instance best-rule vs ours makespan."""
     df = pd.read_csv(main_results_csv, encoding='utf-8-sig')
