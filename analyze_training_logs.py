@@ -10,6 +10,8 @@ bare command works on any OS without line continuations):
     python analyze_training_logs.py decision_time_heatmap
     python analyze_training_logs.py drl_gap_violin
     python analyze_training_logs.py gap_by_tasks
+    python analyze_training_logs.py dumbbell
+    python analyze_training_logs.py gap_ecdf
     python analyze_training_logs.py scalability
     python analyze_training_logs.py gantt --gantt-instance u6_t60
     python analyze_training_logs.py summary
@@ -72,9 +74,6 @@ VARIANT_LABELS = {
     'shared_encoder': 'SharedEncoder',
     'no_reward_norm': 'NoRewardNorm',
 }
-VARIANT_STYLES = {
-    'full': '-', 'no_hgnn': '--', 'shared_encoder': '-.', 'no_reward_norm': ':',
-}
 REFERENCE_COLOR = '#555555'
 ZERO_LINE_COLOR = '#999999'
 
@@ -95,10 +94,12 @@ NUMERIC_COLUMNS = [
 
 
 def _set_style():
-    """Journal figure style: serif/STIX, embedded fonts, recessive axes."""
+    """Journal figure style following the reference book's closed-frame
+    convention: all four spines, inward mirrored ticks, minor ticks on value
+    axes, Times/serif typography, embedded fonts."""
     plt.rcParams.update({
         'font.family': 'serif',
-        'font.serif': ['STIXGeneral', 'Times New Roman', 'DejaVu Serif'],
+        'font.serif': ['Times New Roman', 'STIXGeneral', 'DejaVu Serif'],
         'mathtext.fontset': 'stix',
         'pdf.fonttype': 42,
         'ps.fonttype': 42,
@@ -108,19 +109,41 @@ def _set_style():
         'xtick.labelsize': 7.5,
         'ytick.labelsize': 7.5,
         'legend.fontsize': 7.5,
-        'axes.spines.top': False,
-        'axes.spines.right': False,
-        'axes.linewidth': 0.7,
-        'xtick.major.width': 0.7,
-        'ytick.major.width': 0.7,
+        # Closed rectangular frame with inward, mirrored ticks
+        'axes.spines.top': True,
+        'axes.spines.right': True,
+        'axes.linewidth': 0.8,
+        'xtick.direction': 'in',
+        'ytick.direction': 'in',
+        'xtick.top': True,
+        'ytick.right': True,
+        'xtick.minor.visible': True,
+        'ytick.minor.visible': True,
+        'xtick.major.width': 0.8,
+        'ytick.major.width': 0.8,
         'grid.color': '#c9c9c9',
         'grid.linewidth': 0.5,
         'grid.alpha': 0.5,
-        'legend.framealpha': 0.9,
-        'legend.edgecolor': '#cccccc',
+        'legend.frameon': False,
         'savefig.bbox': 'tight',
         'savefig.pad_inches': 0.02,
     })
+
+
+def _categorical_x(ax):
+    """Categorical-x axis rule from the reference book: no minor ticks or
+    top mirroring on the categorical axis; value axis keeps its minors."""
+    ax.tick_params(axis='x', which='minor', bottom=False, top=False)
+    ax.tick_params(axis='x', which='major', top=False)
+
+
+ROLLING_WINDOW = 10
+
+
+def _rolling_band(values: pd.Series, window: int = ROLLING_WINDOW):
+    """Rolling mean and std for the fluctuation-band line style."""
+    roll = values.rolling(window, min_periods=1)
+    return roll.mean(), roll.std().fillna(0.0)
 
 
 def _fig_path(output_dir: str, stem: str) -> str:
@@ -276,24 +299,26 @@ def plot_training_curves_grid(run: pd.DataFrame, output_dir: str,
         if curve.empty:
             ax.set_visible(False)
             continue
-        last10_start = curve['visit_index'].max() - LAST_N_VISITS + 1
-        ax.axvspan(last10_start, curve['visit_index'].max(),
-                   color='#0072B2', alpha=0.08, lw=0, label='Last 10 visits')
         best_rule = curve['best_rule_makespan'].dropna()
         if not best_rule.empty:
             ax.axhline(best_rule.iloc[0], color=REFERENCE_COLOR,
                        linestyle='--', linewidth=1.0, label='Best rule')
-        ax.plot(curve['visit_index'], curve['eval_makespan'],
-                color=METHOD_COLORS['Ours'], linewidth=1.2,
-                label='Eval makespan')
-        ax.set_title(instance_id.replace('_', r'\_')
-                     if plt.rcParams['text.usetex'] else instance_id)
+        mean, std = _rolling_band(curve['eval_makespan'].reset_index(drop=True))
+        visits = curve['visit_index'].reset_index(drop=True)
+        ax.fill_between(visits, mean - std, mean + std,
+                        color=METHOD_COLORS['Ours'], alpha=0.18, lw=0.01,
+                        label=f'$\\pm 1\\sigma$ band ({ROLLING_WINDOW}-visit window)')
+        ax.plot(visits, mean, color=METHOD_COLORS['Ours'], linewidth=1.3,
+                label='Ours (rolling mean)')
+        ax.set_title(instance_id)
         ax.set_xlabel('Visit')
         ax.set_ylabel('Makespan')
         ax.grid(True, axis='y')
     handles, labels = axes.flat[0].get_legend_handles_labels()
     order = [labels.index(l) for l in
-             ['Eval makespan', 'Best rule', 'Last 10 visits'] if l in labels]
+             ['Ours (rolling mean)',
+              f'$\\pm 1\\sigma$ band ({ROLLING_WINDOW}-visit window)',
+              'Best rule'] if l in labels]
     fig.legend([handles[i] for i in order], [labels[i] for i in order],
                ncol=3, loc='lower center', bbox_to_anchor=(0.5, -0.03))
     fig.tight_layout(rect=(0, 0.04, 1, 1))
@@ -346,10 +371,14 @@ def plot_ablation_curves_grid(frames: List[pd.DataFrame], output_dir: str,
             curve = _instance_curve(run, instance_id)
             if curve.empty:
                 continue
-            ax.plot(curve['visit_index'], curve['eval_makespan'],
-                    color=VARIANT_COLORS[variant],
-                    linestyle=VARIANT_STYLES[variant],
-                    linewidth=1.2, label=VARIANT_LABELS[variant])
+            mean, std = _rolling_band(
+                curve['eval_makespan'].reset_index(drop=True))
+            visits = curve['visit_index'].reset_index(drop=True)
+            ax.fill_between(visits, mean - std, mean + std,
+                            color=VARIANT_COLORS[variant], alpha=0.15, lw=0.01)
+            ax.plot(visits, mean, color=VARIANT_COLORS[variant],
+                    linestyle='-', linewidth=1.25,
+                    label=VARIANT_LABELS[variant])
             plotted = True
         if not plotted:
             ax.set_visible(False)
@@ -374,8 +403,10 @@ def _annotated_heatmap(pivot: pd.DataFrame, cbar_label: str, out_stem: str,
     ax.set_yticks(range(len(pivot.index)), [str(int(i)) for i in pivot.index])
     ax.set_xlabel('Number of tasks $M$')
     ax.set_ylabel('Number of USVs $N$')
-    ax.spines[:].set_visible(False)
-    ax.tick_params(length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(0.8)
+    ax.tick_params(length=0, which='both')
     for i in range(len(pivot.index)):
         for j in range(len(pivot.columns)):
             value = pivot.values[i, j]
@@ -434,56 +465,104 @@ def plot_drl_gap_violin(frames: List[pd.DataFrame], output_dir: str):
     if not data:
         raise SystemExit('No gap data found for the violin figure')
 
-    fig, ax = plt.subplots(figsize=(6.0, 3.2))
+    rng = np.random.default_rng(0)
+    fig, ax = plt.subplots(figsize=(6.2, 3.4))
     ax.axhline(0, color=ZERO_LINE_COLOR, linestyle='--', linewidth=0.8)
-    parts = ax.violinplot(data, showmedians=True, showextrema=False,
-                          widths=0.75)
+
+    # Layer 1: violin bodies (extrema suppressed, restyled by hand)
+    parts = ax.violinplot(data, showmedians=False, showextrema=False,
+                          widths=0.8)
     for body, label in zip(parts['bodies'], labels):
         body.set_facecolor(METHOD_COLORS[label])
-        body.set_alpha(0.75)
+        body.set_alpha(0.55)
         body.set_edgecolor('#333333')
-        body.set_linewidth(0.6)
-    parts['cmedians'].set_color('#1a1a1a')
-    parts['cmedians'].set_linewidth(1.0)
+        body.set_linewidth(0.7)
+
+    # Layer 2: slim inner boxplot (gray whiskers, black median)
+    ax.boxplot(data, positions=range(1, len(labels) + 1), widths=0.14,
+               showfliers=False, showcaps=False,
+               boxprops={'linewidth': 1.0, 'color': '#333333'},
+               medianprops={'linewidth': 1.5, 'color': '#1a1a1a'},
+               whiskerprops={'linewidth': 1.0, 'color': '#555555'})
+
+    # Layer 3: raw points with heavy-tailed t(df=6) jitter
+    for idx, (values, label) in enumerate(zip(data, labels), start=1):
+        jitter = rng.standard_t(df=6, size=len(values)) * 0.045
+        ax.scatter(idx + jitter, values, s=3.5,
+                   color=METHOD_COLORS[label], alpha=0.30, linewidths=0,
+                   zorder=3)
+
     for idx, values in enumerate(data, start=1):
-        ax.text(idx + 0.42, np.median(values), f'{np.median(values):+.1f}',
+        ax.text(idx + 0.44, np.median(values), f'{np.median(values):+.1f}',
                 fontsize=7, va='center', ha='left', color='#1a1a1a')
+    ax.text(0.01, 0.975,
+            f'$n$ = {len(data[0])} per method '
+            f'(instances $\\times$ last {LAST_N_VISITS} visits)',
+            transform=ax.transAxes, ha='left', va='top',
+            fontsize=6.5, color='#555555')
     ax.set_xticks(range(1, len(labels) + 1), labels)
+    _categorical_x(ax)
     ax.set_ylabel('Gap to best rule (%)')
     ax.grid(True, axis='y')
     fig.tight_layout()
     _save(fig, output_dir, 'drl_gap_violin')
 
 
-def plot_gap_by_tasks(summary: pd.DataFrame, output_dir: str):
-    """Boxplot of ours gap% grouped by task count (PPO/full rows only)."""
-    plot_df = summary[(summary['algorithm'] == 'PPO') &
-                      (summary['variant'] == 'full')]
-    plot_df = plot_df.dropna(subset=['gap_to_best_rule_percent', 'n_tasks'])
-    if plot_df.empty:
-        raise SystemExit('No PPO/full summary rows for the boxplot')
-    fig, ax = plt.subplots(figsize=(5.2, 3.0))
+def plot_gap_by_tasks(run: pd.DataFrame, output_dir: str):
+    """Raincloud plot of ours gap% grouped by task count: half-violin cloud,
+    slim central box, heavy-tailed jittered rain (pure matplotlib).
+
+    Points are the pooled last-10-visit gaps of every instance in the group
+    (5 instances x 10 visits = 50 points per task count with real data).
+    """
+    pooled: Dict[int, list] = {}
+    for _, group in run.groupby('instance_id'):
+        tail = group.sort_values('epoch').dropna(
+            subset=['gap_to_best_rule_percent']).tail(LAST_N_VISITS)
+        if tail.empty:
+            continue
+        n_tasks = int(tail['n_tasks'].iloc[0])
+        pooled.setdefault(n_tasks, []).extend(
+            tail['gap_to_best_rule_percent'].tolist())
+    if not pooled:
+        raise SystemExit('No PPO/full gap data for the raincloud plot')
+
+    task_counts = sorted(pooled)
+    groups = [np.asarray(pooled[n]) for n in task_counts]
+    # Ordinal grouping variable -> single-hue light-to-dark sequence
+    shades = plt.get_cmap('Blues')(np.linspace(0.35, 0.85, len(task_counts)))
+    rng = np.random.default_rng(0)
+
+    fig, ax = plt.subplots(figsize=(5.6, 3.2))
     ax.axhline(0, color=ZERO_LINE_COLOR, linestyle='--', linewidth=0.8)
-    task_counts = sorted(plot_df['n_tasks'].unique())
-    groups = [plot_df[plot_df['n_tasks'] == n]['gap_to_best_rule_percent'].values
-              for n in task_counts]
-    box = ax.boxplot(groups, showmeans=True, widths=0.55, patch_artist=True,
-                     medianprops=dict(color='#1a1a1a', linewidth=1.0),
-                     meanprops=dict(marker='D', markerfacecolor='#ffffff',
-                                    markeredgecolor='#1a1a1a', markersize=4),
-                     flierprops=dict(marker='o', markersize=3,
-                                     markerfacecolor='none',
-                                     markeredgecolor='#777777'))
-    for patch in box['boxes']:
-        patch.set_facecolor(METHOD_COLORS['Ours'])
-        patch.set_alpha(0.55)
-        patch.set_edgecolor('#333333')
-        patch.set_linewidth(0.7)
-    for whisk in box['whiskers'] + box['caps']:
-        whisk.set_color('#333333')
-        whisk.set_linewidth(0.7)
-    ax.set_xticks(range(1, len(task_counts) + 1),
-                  [str(int(n)) for n in task_counts])
+
+    positions = np.arange(1, len(task_counts) + 1)
+    # Cloud: half violin, flattened on the right side, nudged left
+    parts = ax.violinplot(groups, positions=positions - 0.12, widths=0.9,
+                          showmedians=False, showextrema=False)
+    for body, shade, pos in zip(parts['bodies'], shades, positions - 0.12):
+        verts = body.get_paths()[0].vertices
+        verts[:, 0] = np.clip(verts[:, 0], -np.inf, pos)
+        body.set_facecolor(shade)
+        body.set_alpha(0.75)
+        body.set_edgecolor('#333333')
+        body.set_linewidth(0.6)
+
+    # Box: slim, central, no caps/fliers
+    ax.boxplot(groups, positions=positions, widths=0.10,
+               showfliers=False, showcaps=False,
+               boxprops={'linewidth': 1.0, 'color': '#333333'},
+               medianprops={'linewidth': 1.5, 'color': '#1a1a1a'},
+               whiskerprops={'linewidth': 1.0, 'color': '#555555'})
+
+    # Rain: jittered raw points, nudged right
+    for pos, values, shade in zip(positions, groups, shades):
+        jitter = rng.standard_t(df=6, size=len(values)) * 0.03
+        ax.scatter(pos + 0.22 + jitter, values, s=5, color=shade,
+                   alpha=0.6, edgecolors='#333333', linewidths=0.3, zorder=3)
+
+    ax.set_xticks(positions, [str(int(n)) for n in task_counts])
+    _categorical_x(ax)
     ax.set_xlabel('Number of tasks $M$')
     ax.set_ylabel('Gap to best rule (%)')
     ax.grid(True, axis='y')
@@ -491,84 +570,74 @@ def plot_gap_by_tasks(summary: pd.DataFrame, output_dir: str):
     _save(fig, output_dir, 'gap_by_tasks')
 
 
-def plot_scalability(main_results_csv: str, scalability_csv: str,
-                     output_dir: str):
-    """(a) per-method gap% vs M (zero-shot shaded); (b) log solve time vs M."""
-    train_df = (pd.read_csv(main_results_csv, encoding='utf-8-sig')
-                if main_results_csv and os.path.exists(main_results_csv)
-                else None)
-    scal = (pd.read_csv(scalability_csv, encoding='utf-8-sig')
-            if scalability_csv and os.path.exists(scalability_csv) else None)
-    if train_df is None and scal is None:
-        raise SystemExit('Neither main_results.csv nor scalability_summary.csv found')
+def plot_improvement_dumbbell(main_results_csv: str, output_dir: str):
+    """Horizontal dumbbell chart: per-instance best-rule vs ours makespan."""
+    df = pd.read_csv(main_results_csv, encoding='utf-8-sig')
+    df = df.dropna(subset=['best_rule_cmax', 'ours_last10_mean'])
+    if df.empty:
+        raise SystemExit('main_results.csv has no filled result rows yet')
+    df = df.sort_values(['n_usvs', 'n_tasks']).reset_index(drop=True)
 
-    fig, (ax_gap, ax_time) = plt.subplots(1, 2, figsize=(6.8, 2.9))
+    fig, ax = plt.subplots(figsize=(5.2, 5.8))
+    y = np.arange(len(df))
+    improved = df['ours_last10_mean'] <= df['best_rule_cmax']
+    ax.hlines(y[improved], df.loc[improved, 'ours_last10_mean'],
+              df.loc[improved, 'best_rule_cmax'],
+              color=METHOD_COLORS['Ours'], linewidth=1.4, zorder=1,
+              label='Improvement')
+    if (~improved).any():
+        ax.hlines(y[~improved], df.loc[~improved, 'best_rule_cmax'],
+                  df.loc[~improved, 'ours_last10_mean'],
+                  color='#D55E00', linewidth=1.4, zorder=1,
+                  label='Regression')
+    ax.scatter(df['best_rule_cmax'], y, s=26, color='#bbbbbb',
+               edgecolors='#333333', linewidths=0.6, zorder=2,
+               label='Best rule')
+    ax.scatter(df['ours_last10_mean'], y, s=26,
+               color=METHOD_COLORS['Ours'], edgecolors='#333333',
+               linewidths=0.6, zorder=3, label='Ours')
 
-    train_max_tasks = train_df['n_tasks'].max() if train_df is not None else None
-    zero_shot_max = scal['n_tasks'].max() if scal is not None else None
-
-    for ax in (ax_gap, ax_time):
-        if train_max_tasks is not None and zero_shot_max is not None:
-            ax.axvspan(train_max_tasks, zero_shot_max, color='#E69F00',
-                       alpha=0.07, lw=0)
-
-    # (a) gap vs M per method (mean over fleet sizes)
-    ax_gap.axhline(0, color=ZERO_LINE_COLOR, linestyle='--', linewidth=0.8)
-    if train_df is not None:
-        series = train_df.groupby('n_tasks')['gap_percent'].mean()
-        ax_gap.plot(series.index, series.values,
-                    color=METHOD_COLORS['Ours'], marker=METHOD_MARKERS['Ours'],
-                    markersize=3.5, linewidth=1.3, label='Ours')
-    if scal is not None:
-        gap_cols = [('ppo_gap_percent', 'Ours'), ('a2c_gap_percent', 'A2C'),
-                    ('dqn_gap_percent', 'DQN'), ('ddqn_gap_percent', 'DDQN'),
-                    ('reinforce_gap_percent', 'REINFORCE')]
-        for col, label in gap_cols:
-            if col not in scal:
-                continue
-            series = scal.groupby('n_tasks')[col].mean().dropna()
-            if series.empty:
-                continue
-            ax_gap.plot(series.index, series.values,
-                        color=METHOD_COLORS[label],
-                        marker=METHOD_MARKERS[label], markersize=3.5,
-                        linewidth=1.1, linestyle='--' if label == 'Ours' else '-',
-                        label=f'{label} (zero-shot)' if label == 'Ours' else label)
-    ax_gap.set_xlabel('Number of tasks $M$')
-    ax_gap.set_ylabel('Gap to best rule (%)')
-    ax_gap.set_title('(a) Solution quality across scales', fontsize=8.5)
-    ax_gap.legend(ncol=2, columnspacing=0.8, handlelength=1.6)
-    ax_gap.grid(True, axis='y')
-
-    # (b) solve time vs M, log axis
-    if scal is not None:
-        time_cols = [('best_rule_solve_time_sec', 'Best rule'),
-                     ('ppo_solve_time_sec', 'Ours'),
-                     ('a2c_solve_time_sec', 'A2C'),
-                     ('dqn_solve_time_sec', 'DQN'),
-                     ('ddqn_solve_time_sec', 'DDQN'),
-                     ('reinforce_solve_time_sec', 'REINFORCE')]
-        for col, label in time_cols:
-            if col not in scal:
-                continue
-            series = scal.groupby('n_tasks')[col].mean().dropna()
-            if series.empty:
-                continue
-            ax_time.plot(series.index, series.values,
-                         color=METHOD_COLORS[label],
-                         marker=METHOD_MARKERS[label], markersize=3.5,
-                         linewidth=1.1,
-                         linestyle='--' if label == 'Best rule' else '-',
-                         label=label)
-        ax_time.set_yscale('log')
-    ax_time.set_xlabel('Number of tasks $M$')
-    ax_time.set_ylabel('Solution time (s)')
-    ax_time.set_title('(b) Zero-shot solution time', fontsize=8.5)
-    ax_time.legend(ncol=2, columnspacing=0.8, handlelength=1.6)
-    ax_time.grid(True, which='both', axis='y')
-
+    ax.set_yticks(y, df['instance_id'])
+    ax.tick_params(axis='y', which='minor', left=False, right=False)
+    ax.tick_params(axis='y', which='major', right=False)
+    ax.invert_yaxis()
+    ax.set_xlabel('Makespan')
+    ax.grid(True, axis='x')
+    ax.legend(loc='lower right', handlelength=1.4)
     fig.tight_layout()
-    _save(fig, output_dir, 'scalability')
+    _save(fig, output_dir, 'improvement_dumbbell')
+
+
+def plot_gap_ecdf(drl_results_csv: str, output_dir: str):
+    """ECDF of per-instance last-10 gaps for every learning method."""
+    df = pd.read_csv(drl_results_csv, encoding='utf-8-sig')
+    if df.empty or 'best_rule_cmax' not in df.columns:
+        raise SystemExit('drl_results.csv missing or lacks best_rule_cmax')
+
+    method_cols = [('ours', 'Ours'), ('a2c', 'A2C'), ('dqn', 'DQN'),
+                   ('ddqn', 'DDQN'), ('reinforce', 'REINFORCE')]
+    fig, ax = plt.subplots(figsize=(4.6, 3.4))
+    ax.axvline(0, color=ZERO_LINE_COLOR, linestyle='--', linewidth=0.8)
+    for key, label in method_cols:
+        col = f'{key}_last10_mean'
+        if col not in df.columns:
+            continue
+        sub = df.dropna(subset=[col, 'best_rule_cmax'])
+        if sub.empty:
+            continue
+        gaps = np.sort(((sub[col] - sub['best_rule_cmax']) /
+                        sub['best_rule_cmax'] * 100.0).values)
+        frac = np.arange(1, len(gaps) + 1) / len(gaps)
+        ax.step(gaps, frac, where='post', color=METHOD_COLORS[label],
+                linewidth=1.3, marker=METHOD_MARKERS[label], markersize=3.5,
+                markevery=5, label=label)
+    ax.set_xlabel('Gap to best rule (%)')
+    ax.set_ylabel('Cumulative fraction of instances')
+    ax.set_ylim(0, 1.02)
+    ax.grid(True)
+    ax.legend(loc='lower right', handlelength=1.6)
+    fig.tight_layout()
+    _save(fig, output_dir, 'gap_ecdf')
 
 
 # --------------------------------------------------------------------------
@@ -673,14 +742,14 @@ def plot_gantt_comparison(args, output_dir: str):
 
     legend_patches = [
         mpatches.Patch(facecolor=plt.get_cmap('tab20')(0),
-                       edgecolor='white', label='Task'),
+                       edgecolor='white', label='Task (colour = task ID)'),
         mpatches.Patch(facecolor='#c9c9c9', hatch='////', alpha=0.85,
                        label='Travel'),
         mpatches.Patch(facecolor='#F0E442', edgecolor='#8a7d00',
                        label='Battery swap'),
     ]
     fig.legend(handles=legend_patches, ncol=3, loc='lower center',
-               bbox_to_anchor=(0.5, -0.04))
+               bbox_to_anchor=(0.5, -0.04), frameon=False)
     fig.tight_layout(rect=(0, 0.04, 1, 1))
     _save(fig, output_dir, 'gantt_comparison')
 
@@ -691,7 +760,8 @@ def plot_gantt_comparison(args, output_dir: str):
 
 FIGURES = ['training_curves', 'convergence_all25', 'ablation_curves',
            'gap_heatmap', 'decision_time_heatmap', 'drl_gap_violin',
-           'gap_by_tasks', 'scalability', 'gantt', 'summary']
+           'gap_by_tasks', 'dumbbell', 'gap_ecdf', 'scalability',
+           'gantt', 'summary']
 
 
 def run_figure(name: str, args):
@@ -708,10 +778,11 @@ def run_figure(name: str, args):
     elif name == 'drl_gap_violin':
         plot_drl_gap_violin(load_logs(args.log_dir), args.output_dir)
     elif name == 'gap_by_tasks':
-        frames = load_logs(args.log_dir)
-        summary = build_summary(
-            frames, os.path.join(args.log_dir, 'summary.csv'))
-        plot_gap_by_tasks(summary, args.output_dir)
+        plot_gap_by_tasks(_require_run(args), args.output_dir)
+    elif name == 'dumbbell':
+        plot_improvement_dumbbell(args.main_results_csv, args.output_dir)
+    elif name == 'gap_ecdf':
+        plot_gap_ecdf(args.drl_results_csv, args.output_dir)
     elif name == 'scalability':
         plot_scalability(args.main_results_csv, args.scalability_csv,
                          args.output_dir)
@@ -758,6 +829,8 @@ def build_parser():
                         default=os.path.join('results', 'main_results.csv'))
     parser.add_argument('--scalability-csv',
                         default=os.path.join('results', 'scalability_summary.csv'))
+    parser.add_argument('--drl-results-csv',
+                        default=os.path.join('results', 'drl_results.csv'))
     parser.add_argument('--decision-time-csv',
                         default=os.path.join('results', 'decision_time_grid.csv'))
     parser.add_argument('--data-dir', default=os.path.join('data', 'public'))
