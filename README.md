@@ -67,11 +67,10 @@ python multi_train.py
 python ablation_experiment.py
 #    或单独跑某个变体: python multi_train.py --variant no_hgnn
 
-# ④ 四个 DRL 基线（同一协议）
-python -m drl_baselines.multi_run --algorithm A2C
-python -m drl_baselines.multi_run --algorithm DQN
-python -m drl_baselines.multi_run --algorithm DDQN
-python -m drl_baselines.multi_run --algorithm REINFORCE
+# ④ 四个 DRL 基线（同一协议；独立子进程自动串行）
+python -m drl_baselines.run_all
+#    中断后可从指定算法继续: python -m drl_baselines.run_all --start-from DQN
+#    仍可单独运行某个算法: python -m drl_baselines.multi_run --algorithm A2C
 
 # ⑤ 泛化与可扩展性：全部方法从各自 u10_t100 最优 checkpoint 零样本评测 7 个大算例
 python scalability_experiment.py
@@ -91,7 +90,8 @@ python main.py            # demo 模式生成 results/gantt.png（见 main.py �
 
 训练期间 Visdom 展示 **25 条逐算例训练曲线**（`Eval Makespan by Instance` 与 `Gap vs Best Rule (%) by Instance` 两个多曲线窗口，每算例每 25 个周期新增一个数据点），以及损失/熵/耗时等汇总曲线。
 
-常用参数（`multi_train.py` 与 `drl_baselines/multi_run.py` 同名）：
+常用参数（`multi_train.py`、`drl_baselines/multi_run.py` 与
+`drl_baselines/run_all.py` 同名；批量入口会把参数传给每个基线）：
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -137,6 +137,10 @@ python multi_train.py --instances u2_t20,u2_t40,u2_t60 --max-epochs 9 \
 python -m drl_baselines.multi_run --algorithm A2C \
     --instances u2_t20,u2_t40 --max-epochs 4 --hidden-dim 16 --no-visdom
 
+# 四个基线自动串行冒烟
+python -m drl_baselines.run_all --instances u2_t20 --max-epochs 4 \
+    --hidden-dim 16 --hgnn-layers 1 --n-trajectories 2 --no-visdom
+
 # 泛化实验冒烟（随机初始化网络走通全流程，无需训练好的 checkpoint）
 python scalability_experiment.py --smoke
 ```
@@ -147,6 +151,7 @@ python scalability_experiment.py --smoke
 |---|---|
 | `multi_train.py` | **轮询多算例训练器**（我方 + 消融变体）与规则基线缓存 |
 | `ablation_experiment.py` | 三个消融变体的轮询训练驱动 |
+| `drl_baselines/run_all.py` | 四个 DRL 基线的独立子进程串行总控入口 |
 | `drl_baselines/multi_run.py` | DRL 基线轮询训练驱动 |
 | `drl_baselines/base.py` | 基线共享轮询训练循环 `train_round_robin` |
 | `drl_baselines/{a2c,dqn,ddqn,reinforce}.py` | 各基线的 `train_epoch` 与单例训练 |

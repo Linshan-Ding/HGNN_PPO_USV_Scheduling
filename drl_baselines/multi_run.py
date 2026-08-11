@@ -22,10 +22,8 @@ from multi_train import ensure_rules_results, load_public_instances
 from .registry import get_algorithm, list_algorithms
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--algorithm', required=True,
-                        help=f'One of: {", ".join(list_algorithms())}')
+def add_training_arguments(parser):
+    """Add arguments shared by the single- and all-baseline runners."""
     parser.add_argument('--data-dir', default=os.path.join('data', 'public'))
     parser.add_argument('--result-dir', default='results')
     parser.add_argument('--model-dir', default='models')
@@ -46,6 +44,45 @@ def build_parser():
     parser.add_argument('--visdom-env', default='usv_rr')
     parser.add_argument('--no-training-csv', action='store_true')
     parser.add_argument('--rules-seed', type=int, default=20260519)
+    return parser
+
+
+def training_args_to_cli(args):
+    """Serialize shared training arguments for a ``multi_run`` child process."""
+    value_options = (
+        ('--data-dir', args.data_dir),
+        ('--result-dir', args.result_dir),
+        ('--model-dir', args.model_dir),
+        ('--max-epochs', args.max_epochs),
+        ('--seed', args.seed),
+        ('--hidden-dim', args.hidden_dim),
+        ('--hgnn-layers', args.hgnn_layers),
+        ('--n-heads', args.n_heads),
+        ('--dropout', args.dropout),
+        ('--n-trajectories', args.n_trajectories),
+        ('--epsilon-decay-epochs', args.epsilon_decay_epochs),
+        ('--rr-replay-size', args.rr_replay_size),
+        ('--visdom-env', args.visdom_env),
+        ('--rules-seed', args.rules_seed),
+    )
+    cli_args = []
+    for option, value in value_options:
+        cli_args.extend((option, str(value)))
+    if args.instances is not None:
+        cli_args.extend(('--instances', args.instances))
+    if args.no_visdom:
+        cli_args.append('--no-visdom')
+    if args.no_training_csv:
+        cli_args.append('--no-training-csv')
+    return cli_args
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--algorithm', required=True,
+                        choices=list_algorithms(),
+                        help=f'One of: {", ".join(list_algorithms())}')
+    add_training_arguments(parser)
     return parser
 
 

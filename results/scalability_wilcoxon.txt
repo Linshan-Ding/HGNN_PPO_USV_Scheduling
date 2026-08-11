@@ -1,0 +1,4 @@
+wilcoxon_w_plus=0.000000
+p_value=0.01124714
+avg_improvement_percent=6.704535
+n_instances=7

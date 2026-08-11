@@ -1,0 +1,9 @@
+﻿comparison,w_plus,p_value,significant,n_pairs
+ours_vs_best_rule,18.0,5.3401022335006544e-05,1,25
+ours_vs_a2c,10.0,2.1582557980688436e-05,1,25
+ours_vs_dqn,0.0,6.535302739006537e-06,1,25
+ours_vs_ddqn,0.0,6.535302739006537e-06,1,25
+ours_vs_reinforce,8.0,1.7089991002148417e-05,1,25
+full_vs_no_hgnn,94.0,0.0336496497619338,1,25
+full_vs_shared_encoder,27.0,0.0001403806962229119,1,25
+full_vs_no_reward_norm,3.0,9.420578597403509e-06,1,25
