@@ -17,8 +17,15 @@ bare command works on any OS without line continuations):
     python analyze_training_logs.py summary
     python analyze_training_logs.py all
 
-Outputs land in results/figures/*.pdf and map 1:1 to the paper's
-figures/fig_*.tex placeholders.
+Outputs land in results/figures/*.pdf and map 1:1 to the paper's figures.
+
+Two page layouts are supported.  The default ``--layout journal`` sizes every
+figure for a single-column (Elsevier) page; ``--layout ieee`` re-lays every
+figure out at the IEEE Transactions column width (3.5 in) or text width
+(7.16 in) with 7-8 pt fonts, so the figures are typeset at 100 % scale in a
+two-column IEEEtran paper (outputs then default to results/figures_ieee/):
+
+    python analyze_training_logs.py all --layout ieee
 
 Style: Okabe-Ito colorblind-safe categorical palette with a fixed
 method-to-color mapping (identity is never re-assigned across figures),
@@ -41,6 +48,33 @@ from matplotlib import colors as mcolors
 from matplotlib import patches as mpatches
 
 FIG_FORMAT = 'pdf'
+LAYOUT = 'journal'          # 'journal' (single column) or 'ieee' (two column)
+SMALL_FS = 7.5              # annotation font size, adjusted per layout
+
+# Figure sizes (inches) for the IEEEtran two-column layout: single-column
+# figures are 3.5 in wide, page-wide figures 7.0 in.  The journal sizes are
+# the ones written at the call sites.
+IEEE_FIGSIZES = {
+    'training_curves': (3.5, 2.9),
+    'ablation_curves': (3.5, 2.9),
+    'all25_convergence': (7.0, 6.2),
+    'gap_heatmap': (3.4, 2.55),
+    'decision_time_heatmap': (3.4, 2.55),
+    'drl_gap_violin': (3.5, 2.5),
+    'gap_by_tasks': (3.5, 2.3),
+    'scalability': (7.0, 2.6),
+    'improvement_dumbbell': (3.5, 4.4),
+    'gap_ecdf': (3.4, 2.6),
+    'gantt': (7.0, None),
+}
+
+
+def _figsize(name: str, journal_w: float, journal_h: float):
+    """Figure size for the active layout (journal sizes are the defaults)."""
+    if LAYOUT != 'ieee' or name not in IEEE_FIGSIZES:
+        return (journal_w, journal_h)
+    w, h = IEEE_FIGSIZES[name]
+    return (w, journal_h * w / journal_w if h is None else h)
 
 REPRESENTATIVE_INSTANCES = ['u2_t20', 'u4_t60', 'u8_t80', 'u10_t100']
 ABLATION_VARIANTS = ['full', 'no_hgnn', 'shared_encoder', 'no_reward_norm']
@@ -93,22 +127,30 @@ NUMERIC_COLUMNS = [
 ]
 
 
-def _set_style():
+def _set_style(layout: str = 'journal'):
     """Journal figure style following the reference book's closed-frame
     convention: all four spines, inward mirrored ticks, minor ticks on value
-    axes, Times/serif typography, embedded fonts."""
+    axes, Times/serif typography, embedded fonts.  The ``ieee`` layout keeps
+    the same style at the smaller IEEEtran column width."""
+    global LAYOUT, SMALL_FS
+    LAYOUT = layout
+    if layout == 'ieee':
+        SMALL_FS = 6.5
+        sizes = {'font.size': 7.5, 'axes.titlesize': 8, 'axes.labelsize': 7.5,
+                 'xtick.labelsize': 6.5, 'ytick.labelsize': 6.5,
+                 'legend.fontsize': 6.5}
+    else:
+        SMALL_FS = 7.5
+        sizes = {'font.size': 8.5, 'axes.titlesize': 9, 'axes.labelsize': 8.5,
+                 'xtick.labelsize': 7.5, 'ytick.labelsize': 7.5,
+                 'legend.fontsize': 7.5}
+    plt.rcParams.update(sizes)
     plt.rcParams.update({
         'font.family': 'serif',
         'font.serif': ['Times New Roman', 'STIXGeneral', 'DejaVu Serif'],
         'mathtext.fontset': 'stix',
         'pdf.fonttype': 42,
         'ps.fonttype': 42,
-        'font.size': 8.5,
-        'axes.titlesize': 9,
-        'axes.labelsize': 8.5,
-        'xtick.labelsize': 7.5,
-        'ytick.labelsize': 7.5,
-        'legend.fontsize': 7.5,
         # Closed rectangular frame with inward, mirrored ticks
         'axes.spines.top': True,
         'axes.spines.right': True,
@@ -293,7 +335,7 @@ def plot_training_curves_grid(run: pd.DataFrame, output_dir: str,
                               instances: List[str] = None):
     """2x2 grid: eval makespan vs visit, best-rule line, last-10 shaded."""
     instances = instances or REPRESENTATIVE_INSTANCES
-    fig, axes = plt.subplots(2, 2, figsize=(6.6, 4.6))
+    fig, axes = plt.subplots(2, 2, figsize=_figsize('training_curves', 6.6, 4.6))
     for ax, instance_id in zip(axes.flat, instances):
         curve = _instance_curve(run, instance_id)
         if curve.empty:
@@ -333,7 +375,9 @@ def plot_all25_convergence_grid(run: pd.DataFrame, output_dir: str):
     n = len(instances)
     ncols = 5
     nrows = max((n + ncols - 1) // ncols, 1)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6.8, 1.35 * nrows + 0.5),
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=_figsize('all25_convergence', 6.8,
+                                              1.35 * nrows + 0.5),
                              sharex=True)
     axes_flat = np.atleast_1d(axes).ravel()
     for ax, instance_id in zip(axes_flat, instances):
@@ -361,7 +405,7 @@ def plot_ablation_curves_grid(frames: List[pd.DataFrame], output_dir: str,
             for variant in ABLATION_VARIANTS}
     if runs.get('full') is None:
         raise SystemExit('No PPO/full run found for the ablation figure')
-    fig, axes = plt.subplots(2, 2, figsize=(6.6, 4.6))
+    fig, axes = plt.subplots(2, 2, figsize=_figsize('ablation_curves', 6.6, 4.6))
     for ax, instance_id in zip(axes.flat, instances):
         plotted = False
         for variant in ABLATION_VARIANTS:
@@ -396,7 +440,7 @@ def plot_ablation_curves_grid(frames: List[pd.DataFrame], output_dir: str,
 
 def _annotated_heatmap(pivot: pd.DataFrame, cbar_label: str, out_stem: str,
                        output_dir: str, cmap, norm=None, fmt='{:.1f}'):
-    fig, ax = plt.subplots(figsize=(4.6, 3.4))
+    fig, ax = plt.subplots(figsize=_figsize(out_stem, 4.6, 3.4))
     im = ax.imshow(pivot.values, cmap=cmap, norm=norm, aspect='auto')
     ax.set_xticks(range(len(pivot.columns)),
                   [str(int(c)) for c in pivot.columns])
@@ -415,7 +459,7 @@ def _annotated_heatmap(pivot: pd.DataFrame, cbar_label: str, out_stem: str,
             r, g, b, _ = im.cmap(im.norm(value))
             luminance = 0.299 * r + 0.587 * g + 0.114 * b
             ax.text(j, i, fmt.format(value), ha='center', va='center',
-                    fontsize=7.5,
+                    fontsize=SMALL_FS,
                     color='white' if luminance < 0.5 else '#1a1a1a')
     cbar = fig.colorbar(im, ax=ax, shrink=0.92)
     cbar.set_label(cbar_label)
@@ -466,7 +510,7 @@ def plot_drl_gap_violin(frames: List[pd.DataFrame], output_dir: str):
         raise SystemExit('No gap data found for the violin figure')
 
     rng = np.random.default_rng(0)
-    fig, ax = plt.subplots(figsize=(6.2, 3.4))
+    fig, ax = plt.subplots(figsize=_figsize('drl_gap_violin', 6.2, 3.4))
     ax.axhline(0, color=ZERO_LINE_COLOR, linestyle='--', linewidth=0.8)
 
     # Layer 1: violin bodies (extrema suppressed, restyled by hand)
@@ -494,12 +538,13 @@ def plot_drl_gap_violin(frames: List[pd.DataFrame], output_dir: str):
 
     for idx, values in enumerate(data, start=1):
         ax.text(idx + 0.44, np.median(values), f'{np.median(values):+.1f}',
-                fontsize=7, va='center', ha='left', color='#1a1a1a')
+                fontsize=SMALL_FS - 0.5, va='center', ha='left',
+                color='#1a1a1a')
     ax.text(0.01, 0.975,
             f'$n$ = {len(data[0])} per method '
             f'(instances $\\times$ last {LAST_N_VISITS} visits)',
             transform=ax.transAxes, ha='left', va='top',
-            fontsize=6.5, color='#555555')
+            fontsize=SMALL_FS - 1, color='#555555')
     ax.set_xticks(range(1, len(labels) + 1), labels)
     _categorical_x(ax)
     ax.set_ylabel('Gap to best rule (%)')
@@ -533,7 +578,7 @@ def plot_gap_by_tasks(run: pd.DataFrame, output_dir: str):
     shades = plt.get_cmap('Blues')(np.linspace(0.35, 0.85, len(task_counts)))
     rng = np.random.default_rng(0)
 
-    fig, ax = plt.subplots(figsize=(5.6, 3.2))
+    fig, ax = plt.subplots(figsize=_figsize('gap_by_tasks', 5.6, 3.2))
     ax.axhline(0, color=ZERO_LINE_COLOR, linestyle='--', linewidth=0.8)
 
     positions = np.arange(1, len(task_counts) + 1)
@@ -581,7 +626,8 @@ def plot_scalability(main_results_csv: str, scalability_csv: str,
     if train_df is None and scal is None:
         raise SystemExit('Neither main_results.csv nor scalability_summary.csv found')
 
-    fig, (ax_gap, ax_time) = plt.subplots(1, 2, figsize=(6.8, 2.9))
+    fig, (ax_gap, ax_time) = plt.subplots(
+        1, 2, figsize=_figsize('scalability', 6.8, 2.9))
 
     train_max_tasks = train_df['n_tasks'].max() if train_df is not None else None
     zero_shot_max = scal['n_tasks'].max() if scal is not None else None
@@ -615,7 +661,7 @@ def plot_scalability(main_results_csv: str, scalability_csv: str,
                         label=f'{label} (zero-shot)' if label == 'Ours' else label)
     ax_gap.set_xlabel('Number of tasks $M$')
     ax_gap.set_ylabel('Gap to best rule (%)')
-    ax_gap.set_title('(a) Solution quality across scales', fontsize=8.5)
+    ax_gap.set_title('(a) Solution quality across scales', fontsize=SMALL_FS + 1)
     ax_gap.legend(ncol=2, columnspacing=0.8, handlelength=1.6)
     ax_gap.grid(True, axis='y')
 
@@ -642,7 +688,7 @@ def plot_scalability(main_results_csv: str, scalability_csv: str,
         ax_time.set_yscale('log')
     ax_time.set_xlabel('Number of tasks $M$')
     ax_time.set_ylabel('Solution time (s)')
-    ax_time.set_title('(b) Zero-shot solution time', fontsize=8.5)
+    ax_time.set_title('(b) Zero-shot solution time', fontsize=SMALL_FS + 1)
     ax_time.legend(ncol=2, columnspacing=0.8, handlelength=1.6)
     ax_time.grid(True, which='both', axis='y')
 
@@ -658,7 +704,7 @@ def plot_improvement_dumbbell(main_results_csv: str, output_dir: str):
         raise SystemExit('main_results.csv has no filled result rows yet')
     df = df.sort_values(['n_usvs', 'n_tasks']).reset_index(drop=True)
 
-    fig, ax = plt.subplots(figsize=(5.2, 5.8))
+    fig, ax = plt.subplots(figsize=_figsize('improvement_dumbbell', 5.2, 5.8))
     y = np.arange(len(df))
     improved = df['ours_last10_mean'] <= df['best_rule_cmax']
     ax.hlines(y[improved], df.loc[improved, 'ours_last10_mean'],
@@ -696,7 +742,7 @@ def plot_gap_ecdf(drl_results_csv: str, output_dir: str):
 
     method_cols = [('ours', 'Ours'), ('a2c', 'A2C'), ('dqn', 'DQN'),
                    ('ddqn', 'DDQN'), ('reinforce', 'REINFORCE')]
-    fig, ax = plt.subplots(figsize=(4.6, 3.4))
+    fig, ax = plt.subplots(figsize=_figsize('gap_ecdf', 4.6, 3.4))
     ax.axvline(0, color=ZERO_LINE_COLOR, linestyle='--', linewidth=0.8)
     for key, label in method_cols:
         col = f'{key}_last10_mean'
@@ -750,7 +796,7 @@ def _draw_gantt_panel(ax, env, title: str):
                         color='#F0E442', edgecolor='#8a7d00', linewidth=0.5)
     ax.set_yticks(range(env.n_usvs), [f'USV {i}' for i in range(env.n_usvs)])
     ax.set_xlim(0, max_time * 1.03)
-    ax.set_title(title, fontsize=8.5, loc='left')
+    ax.set_title(title, fontsize=SMALL_FS + 1, loc='left')
     ax.grid(True, axis='x')
     ax.tick_params(length=0)
     return max_time
@@ -807,7 +853,8 @@ def plot_gantt_comparison(args, output_dir: str):
     ours_makespan = info.get('makespan', float('nan'))
 
     fig, (ax_rule, ax_ours) = plt.subplots(
-        2, 1, figsize=(6.8, 1.2 + 0.42 * instance['n_usvs']), sharex=True)
+        2, 1, figsize=_figsize('gantt', 6.8, 1.2 + 0.42 * instance['n_usvs']),
+        sharex=True)
     t1 = _draw_gantt_panel(
         ax_rule, best_env,
         f'(a) Best rule ({best_name.replace("_", "--")}), '
@@ -878,7 +925,10 @@ def run_figure(name: str, args):
 def main(args):
     global FIG_FORMAT
     FIG_FORMAT = args.format
-    _set_style()
+    _set_style(args.layout)
+    if args.output_dir is None:
+        args.output_dir = os.path.join(
+            'results', 'figures_ieee' if args.layout == 'ieee' else 'figures')
 
     if args.figure == 'all':
         for name in FIGURES:
@@ -903,7 +953,12 @@ def build_parser():
     parser.add_argument('figure', choices=FIGURES + ['all'],
                         help='Which figure to generate')
     parser.add_argument('--log-dir', default=os.path.join('results', 'training_logs'))
-    parser.add_argument('--output-dir', default=os.path.join('results', 'figures'))
+    parser.add_argument('--output-dir', default=None,
+                        help='default: results/figures (journal) or '
+                             'results/figures_ieee (ieee)')
+    parser.add_argument('--layout', default='journal', choices=['journal', 'ieee'],
+                        help='journal: single-column page sizes; '
+                             'ieee: IEEEtran two-column sizes (3.5 in / 7 in)')
     parser.add_argument('--format', default='pdf', choices=['pdf', 'png'])
     parser.add_argument('--main-results-csv',
                         default=os.path.join('results', 'main_results.csv'))

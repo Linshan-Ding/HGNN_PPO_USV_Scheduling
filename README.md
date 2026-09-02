@@ -94,9 +94,11 @@ python analyze_training_logs.py scalability
 python analyze_training_logs.py gantt --gantt-instance u6_t60
 #    或一次全部生成（gantt 在缺 checkpoint 时自动跳过）：
 python analyze_training_logs.py all
+#    IEEE 双栏版（T-ITS 论文仓库）：按 IEEEtran 栏宽 3.5 in / 页宽 7 in 重新排版所有图，输出 results/figures_ieee/
+python analyze_training_logs.py all --layout ieee
 ```
 
-各命令的输入默认值：曲线/小提琴/箱线类读 `results/training_logs/`；`gap_heatmap` 读 `results/main_results.csv`；`decision_time_heatmap` 读 `results/decision_time_grid.csv`；`scalability` 读 `results/main_results.csv` + `results/scalability_summary.csv`；`dumbbell` 读 `results/main_results.csv`；`gap_ecdf` 读 `results/drl_results.csv`；`gantt` 读 `data/public/` 实例与 `models/best_{instance}_seed0.pth`（网络规模参数需与训练一致：`--hidden-dim 256 --hgnn-layers 3 --n-heads 4`，即默认值）。输出统一为 `results/figures/*.pdf`（`--format png` 可出预览图）。
+各命令的输入默认值：曲线/小提琴/箱线类读 `results/training_logs/`；`gap_heatmap` 读 `results/main_results.csv`；`decision_time_heatmap` 读 `results/decision_time_grid.csv`；`scalability` 读 `results/main_results.csv` + `results/scalability_summary.csv`；`dumbbell` 读 `results/main_results.csv`；`gap_ecdf` 读 `results/drl_results.csv`；`gantt` 读 `data/public/` 实例与 `models/best_{instance}_seed0.pth`（网络规模参数需与训练一致：`--hidden-dim 256 --hgnn-layers 3 --n-heads 4`，即默认值）。输出统一为 `results/figures/*.pdf`（`--format png` 可出预览图）；`--layout ieee` 时输出 `results/figures_ieee/*.pdf`，字号与图幅按 IEEE 双栏版设定，直接放入 IEEE 论文仓库 `figures/generated/`。
 
 训练期间 Visdom 展示 **25 条逐算例训练曲线**（`Eval Makespan by Instance` 与 `Gap vs Best Rule (%) by Instance` 两个多曲线窗口，每算例每 25 个周期新增一个数据点），以及损失/熵/耗时等汇总曲线。
 
