@@ -63,7 +63,7 @@ IEEE_FIGSIZES = {
     'drl_gap_violin': (3.5, 2.5),
     'gap_by_tasks': (3.5, 2.3),
     'scalability': (7.0, 2.6),
-    'improvement_dumbbell': (3.5, 4.4),
+    'improvement_dumbbell': (3.5, 3.6),
     'gap_ecdf': (3.4, 2.6),
     'gantt': (7.0, None),
 }
