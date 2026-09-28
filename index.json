@@ -7,10 +7,10 @@
     "source_sha": "8cf0c9a258a746ff672cf2d808b25af0bb3c628e",
     "batch_id": null,
     "workflow_url": "https://github.com/Linshan-Ding/HGNN_PPO_USV_Scheduling/actions/runs/36439438049",
-    "artifact_url": "https://github.com/Linshan-Ding/HGNN_PPO_USV_Scheduling/actions/runs/36439438049/artifacts/10978680794",
+    "artifact_url": "https://github.com/Linshan-Ding/HGNN_PPO_USV_Scheduling/actions/runs/36440028318/artifacts/10979490945",
     "artifact_status": "success",
-    "publication_run": "36439438049-1",
-    "published_at": "2026-09-28T15:04:19.464024+00:00"
+    "publication_run": "36440028318-1",
+    "published_at": "2026-09-28T15:12:45.440605+00:00"
   },
   "36439612304-1": {
     "run_key": "36439612304-1",
