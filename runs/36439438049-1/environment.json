@@ -1,0 +1,16 @@
+{
+  "python": "3.13.7 | packaged by Anaconda, Inc. | (main, Sep  9 2025, 19:54:37) [MSC v.1929 64 bit (AMD64)]",
+  "os": "Windows-11-10.0.26200-SP0",
+  "packages": {
+    "numpy": "2.3.3",
+    "pandas": "2.3.2",
+    "matplotlib": "3.10.6",
+    "torch": "2.11.0+cu128",
+    "visdom": "0.2.4",
+    "pytest": "9.1.1"
+  },
+  "cuda_available": true,
+  "cuda_version": "12.8",
+  "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+  "cuda_probe": 16.0
+}
