@@ -1,5 +1,7 @@
 # 考虑能耗约束的多无人船协同任务调度（HGNN + PPO）
 
+**本机 GitHub Actions：** [手动运行、结果查看与后台服务说明](docs/LOCAL_ACTIONS.md)。工作流仅由仓库所有者手动触发，默认执行短冒烟验证。
+
 本项目研究多无人船（USV）协同任务调度问题：多艘无人船从原点基地出发，在航行能耗、作业能耗、电池容量与自动返航换电约束下完成一组作业时长为三角模糊数的测绘任务，优化目标为最小化最大完工时间（makespan）。
 
 主方法为**双编码器异构二部图强化学习**：异构二部图状态表示 + HGNN 编码器 + Pairwise 联合评分策略 + 并行 rollout PPO 训练。对比方法包括 5 条调度规则和 4 个共享同一网络架构的 DRL 基线（A2C / DQN / DDQN / REINFORCE），另有 3 个消融变体（no_hgnn / shared_encoder / no_reward_norm）。

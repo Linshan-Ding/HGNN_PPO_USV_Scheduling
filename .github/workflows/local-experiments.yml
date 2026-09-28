@@ -1,0 +1,171 @@
+name: Local Windows experiments
+run-name: "${{ inputs.task }} / ${{ inputs.method }} / ${{ inputs.source_ref }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: '任务：smoke 冒烟 / train 训练 / scalability 泛化 / report 汇总出图 / republish 补传'
+        type: choice
+        default: smoke
+        options: [smoke, train, scalability, report, republish]
+      source_ref:
+        description: '本仓库代码分支或完整提交 SHA（Use workflow from 保持 master）'
+        type: string
+        default: master
+      method:
+        description: '训练方法（仅 train 使用，每次运行一种）'
+        type: choice
+        default: full
+        options: [full, no_hgnn, shared_encoder, no_reward_norm, A2C, DQN, DDQN, REINFORCE]
+      epochs:
+        description: '正式训练周期（smoke 固定使用短配置）'
+        type: number
+        default: 5000
+      seed:
+        description: '随机种子'
+        type: number
+        default: 0
+      instances:
+        description: '算例子集，逗号分隔；留空使用全部 25 个'
+        type: string
+        default: ''
+      data_source:
+        description: 'report/scalability 输入：batch 本机新实验；historical 代码分支已有结果'
+        type: choice
+        default: batch
+        options: [batch, historical]
+      batch_id:
+        description: 'report/scalability 的批次编号，见训练运行摘要；留空按当前参数定位'
+        type: string
+        default: ''
+      republish_run:
+        description: '仅 republish：待补传运行编号，例如 123456789-1'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hgnn-ppo-usv-local-experiments
+  cancel-in-progress: false
+  queue: max
+
+env:
+  LOCAL_ACTIONS_ROOT: 'D:\GitHubActions\HGNN_PPO_USV_Scheduling'
+  LOCAL_ACTIONS_PYTHON: 'E:\anaconda3\envs\python3.13\python.exe'
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+  MPLBACKEND: Agg
+
+defaults:
+  run:
+    shell: powershell
+
+jobs:
+  compute:
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' &&
+      github.repository == 'Linshan-Ding/HGNN_PPO_USV_Scheduling' &&
+      github.actor == 'Linshan-Ding' && github.triggering_actor == 'Linshan-Ding'
+    runs-on: [self-hosted, Windows, X64, hgnn-ppo-usv]
+    timeout-minutes: 4380
+    outputs:
+      run_key: ${{ steps.init.outputs.run_key }}
+    steps:
+      - name: Checkout trusted controller
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: true
+      - name: Validate inputs and create isolated run
+        id: init
+        env:
+          LOCAL_ACTIONS_INPUTS: ${{ toJSON(inputs) }}
+        run: |
+          & $env:LOCAL_ACTIONS_PYTHON -u control/scripts/local_actions.py init
+          exit $LASTEXITCODE
+      - name: Checkout selected project code
+        if: inputs.task != 'republish'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Linshan-Ding/HGNN_PPO_USV_Scheduling
+          ref: ${{ inputs.source_ref }}
+          path: source
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/models/
+            !/.idea/
+            !/**/__pycache__/
+          sparse-checkout-cone-mode: false
+      - name: Fetch historical models only when requested
+        if: inputs.task != 'republish' && inputs.data_source == 'historical'
+        working-directory: source
+        run: |
+          git sparse-checkout add --no-cone '/models/'
+          exit $LASTEXITCODE
+      - name: Execute selected task
+        id: execute
+        if: inputs.task != 'republish'
+        env:
+          LOCAL_ACTIONS_RUN_KEY: ${{ steps.init.outputs.run_key }}
+        run: |
+          & $env:LOCAL_ACTIONS_PYTHON -u control/scripts/local_actions.py execute --source "$env:GITHUB_WORKSPACE/source"
+          exit $LASTEXITCODE
+      - name: Record final compute status
+        if: always() && steps.init.outputs.run_key != ''
+        env:
+          LOCAL_ACTIONS_RUN_KEY: ${{ steps.init.outputs.run_key }}
+          LOCAL_ACTIONS_COMPUTE_OUTCOME: ${{ steps.execute.outcome }}
+        run: |
+          & $env:LOCAL_ACTIONS_PYTHON -u control/scripts/local_actions.py finalize
+          exit $LASTEXITCODE
+
+  publish:
+    needs: compute
+    if: >-
+      always() && needs.compute.outputs.run_key != '' && github.ref == 'refs/heads/master' &&
+      github.actor == 'Linshan-Ding' && github.triggering_actor == 'Linshan-Ding'
+    runs-on: [self-hosted, Windows, X64, hgnn-ppo-usv]
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      LOCAL_ACTIONS_RUN_KEY: ${{ needs.compute.outputs.run_key }}
+    steps:
+      - name: Checkout trusted publisher
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+          sparse-checkout: scripts
+      - name: Prepare verified output bundle
+        id: bundle
+        run: |
+          & $env:LOCAL_ACTIONS_PYTHON -u control/scripts/local_actions.py bundle
+          exit $LASTEXITCODE
+      - name: Upload complete output
+        id: artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: outputs-${{ needs.compute.outputs.run_key }}-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.bundle.outputs.artifact_path }}
+          retention-days: 14
+          if-no-files-found: error
+          compression-level: 1
+      - name: Commit small results to results branch
+        if: always() && steps.bundle.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCAL_ACTIONS_ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+          LOCAL_ACTIONS_ARTIFACT_STATUS: ${{ steps.artifact.outcome }}
+        run: |
+          & $env:LOCAL_ACTIONS_PYTHON -u control/scripts/local_actions.py publish
+          exit $LASTEXITCODE
