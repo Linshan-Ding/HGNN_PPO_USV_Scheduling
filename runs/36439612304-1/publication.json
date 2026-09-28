@@ -1,0 +1,13 @@
+{
+  "run_key": "36439612304-1",
+  "status": "failed",
+  "task": "train",
+  "method": "full",
+  "source_sha": "8cf0c9a258a746ff672cf2d808b25af0bb3c628e",
+  "batch_id": null,
+  "workflow_url": "https://github.com/Linshan-Ding/HGNN_PPO_USV_Scheduling/actions/runs/36439612304",
+  "artifact_url": "https://github.com/Linshan-Ding/HGNN_PPO_USV_Scheduling/actions/runs/36439612304/artifacts/10978920267",
+  "artifact_status": "success",
+  "publication_run": "36439612304-1",
+  "published_at": "2026-09-28T15:07:53.023711+00:00"
+}

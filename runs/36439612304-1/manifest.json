@@ -1,0 +1,25 @@
+{
+  "repository": "Linshan-Ding/HGNN_PPO_USV_Scheduling",
+  "run_key": "36439612304-1",
+  "status": "failed",
+  "created_at": "2026-09-28T15:05:22.965573+00:00",
+  "inputs": {
+    "task": "train",
+    "source_ref": "8cf0c9a258a746ff672cf2d808b25af0bb3c628e",
+    "method": "full",
+    "epochs": 5000,
+    "seed": 0,
+    "instances": "u999_t999",
+    "data_source": "batch",
+    "batch_id": "",
+    "republish_run": ""
+  },
+  "controller_sha": "8cf0c9a258a746ff672cf2d808b25af0bb3c628e",
+  "workflow_url": "https://github.com/Linshan-Ding/HGNN_PPO_USV_Scheduling/actions/runs/36439612304",
+  "notes": [],
+  "started_at": "2026-09-28T15:05:33.558858+00:00",
+  "source_sha": "8cf0c9a258a746ff672cf2d808b25af0bb3c628e",
+  "exit_code": 1,
+  "error": "Unknown instances: ['u999_t999']",
+  "finished_at": "2026-09-28T15:05:34.165109+00:00"
+}
